@@ -171,13 +171,25 @@ const RainSimulatorPage = () => {
   }, []);
 
   const setupAudio = useCallback(() => {
-    Tone.Destination.volume.value = -Infinity;
     const limiter = new Tone.Limiter(-6).toDestination();
-    const lowpass = new Tone.Filter(3500, "lowpass").connect(limiter);
-    const reverb = new Tone.Reverb({ decay: 1.5, wet: 0.4 }).connect(lowpass);
-    const patSynth = new Tone.PolySynth(Tone.MembraneSynth, { pitchDecay: 0.03, octaves: 3, envelope: { attack: 0.005, decay: 0.25, sustain: 0.01, release: 0.1 } }).connect(reverb);
-    patSynth.maxPolyphony = 8;
-    audioNodesRef.current = { patSynth };
+    const reverb = new Tone.Reverb({ decay: 4, wet: 0.5, preDelay: 0.1 }).connect(limiter);
+
+    const rainNoise = new Tone.Noise("brown").start();
+    const rainFilter = new Tone.AutoFilter({ frequency: '8n', baseFrequency: 600, octaves: 4, depth: 0.8 }).connect(reverb);
+    const rainEQ = new Tone.EQ3({ low: -5, mid: -15, high: -25 }).connect(rainFilter);
+    rainNoise.connect(rainEQ);
+    
+    const patSynth = new Tone.PolySynth(Tone.PluckSynth as any).connect(reverb);
+    patSynth.set({
+      attackNoise: 0.8,
+      dampening: 8000,
+      resonance: 0.9,
+      release: 0.5,
+    } as any);
+    patSynth.volume.value = -10;
+    patSynth.maxPolyphony = 20;
+
+    audioNodesRef.current = { rainNoise, patSynth };
     isAudioSetup.current = true;
   }, []);
 
@@ -189,14 +201,12 @@ const RainSimulatorPage = () => {
     let currentSoundProbability = 0.2;
 
     const playPatSound = (droplet: Droplet) => {
-      if (!isAudioSetup.current || !droplet) return;
+      if (!isAudioSetup.current || !droplet || !audioNodesRef.current.patSynth) return;
       const { patSynth } = audioNodesRef.current;
-      const baseMass = 10 + Math.pow(settings.size, 3.2);
-      const maxMass = baseMass + 10;
-      const massRatio = Math.pow(Math.max(0, droplet.mass - 10) / (maxMass - 10), 0.5);
-      const notes = ['C2', 'D2', 'E2', 'F2', 'G2'];
-      const note = notes[Math.floor(massRatio * (notes.length - 1))];
-      patSynth.triggerAttackRelease(note, "8n", undefined, 0.1 + (massRatio * 0.4));
+      const velocity = Math.min(1, 0.1 + (droplet.mass / 80));
+      const notes = ['C5', 'D5', 'E5', 'G5', 'A5', 'C6', 'D6'];
+      const note = notes[Math.floor(Math.random() * notes.length)];
+      patSynth.triggerAttackRelease(note, "16n", Tone.now(), velocity);
     };
 
     const rgbToHsl = (r:number, g:number, b:number) => { r /= 255; g /= 255; b /= 255; const max = Math.max(r, g, b), min = Math.min(r, g, b); let h = 0, s = 0, l = (max + min) / 2; if (max !== min) { const d = max - min; s = l > 0.5 ? d / (2 - max - min) : d / (max + min); switch (max) { case r: h = (g - b) / d + (g < b ? 6 : 0); break; case g: h = (b - r) / d + 2; break; case b: h = (r - g) / d + 4; break; } h /= 6; } return [h, s, l]; };
@@ -293,7 +303,7 @@ const RainSimulatorPage = () => {
       currentSoundProbability += ((0.1 + (normDrops * (0.4 - 0.1))) - currentSoundProbability) * 0.02;
       for (let i = 0; i < 5; i++) if (Math.random() < settings.amount / 1500) createDroplet();
       const now = performance.now();
-      if (isAudioSetup.current && Tone.Destination.volume.value > -Infinity && now - lastSoundTime > minSoundInterval && Math.random() < currentSoundProbability && dropletsRef.current.length > 0) { playPatSound(dropletsRef.current[Math.floor(Math.random() * dropletsRef.current.length)]); lastSoundTime = now; }
+      if (isAudioSetup.current && now - lastSoundTime > minSoundInterval && Math.random() < currentSoundProbability && dropletsRef.current.length > 0) { playPatSound(dropletsRef.current[Math.floor(Math.random() * dropletsRef.current.length)]); lastSoundTime = now; }
       for (let i = dropletsRef.current.length - 1; i >= 0; i--) { const d = dropletsRef.current[i]; d.update(dynamicSwayIntensity, dropletsRef.current, createDroplet); if (d.y - d.radius > rainCanvas.height) dropletsRef.current.splice(i, 1); else d.draw(rainCtx, bgCanvas, aberrationColorGrid, aberrationGridSize); }
       animationFrameIdRef.current = requestAnimationFrame(animate);
     };
@@ -327,14 +337,19 @@ const RainSimulatorPage = () => {
   }, [createDroplet, populateDroplets, settings.backgroundUrl, settings.amount, settings.size, refreshKey]);
 
   useEffect(() => {
-    if (settings.sound > 0 && !isAudioSetup.current) {
+    if (isAudioContextStarted && settings.sound > 0 && !isAudioSetup.current) {
       setupAudio();
     }
-    if (isAudioSetup.current) {
-      const targetVolume = settings.sound === 0 ? -Infinity : (settings.sound / 100) * 40 - 45;
-      Tone.Destination.volume.rampTo(targetVolume, 0.5);
+    if (isAudioSetup.current && audioNodesRef.current.rainNoise) {
+      const targetVolume = settings.sound === 0 ? -Infinity : (settings.sound / 100) * 25 - 30;
+      audioNodesRef.current.rainNoise.volume.rampTo(targetVolume, 0.5);
+      
+      if (audioNodesRef.current.patSynth) {
+          const patVolume = settings.sound === 0 ? -Infinity : -15 + (settings.sound / 100) * 10;
+          audioNodesRef.current.patSynth.volume.rampTo(patVolume, 0.5);
+      }
     }
-  }, [settings.sound, setupAudio]);
+  }, [settings.sound, setupAudio, isAudioContextStarted]);
 
   return (
     <div onClick={handleInteraction} className="w-screen h-screen bg-black overflow-hidden cursor-default">
