@@ -129,8 +129,8 @@ class Droplet {
 
 const RainSimulatorPage = () => {
   const [settings, setSettings] = useState<RainSettings>({ amount: 700, size: 4, speed: 5, stickiness: 4, sound: 0, backgroundUrl: null });
-  const [isStarted, setIsStarted] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [isAudioContextStarted, setIsAudioContextStarted] = useState(false);
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const rainCanvasRef = useRef<HTMLCanvasElement>(null);
   const dropletsRef = useRef<Droplet[]>([]);
@@ -138,6 +138,13 @@ const RainSimulatorPage = () => {
   const audioNodesRef = useRef<any>({});
   const animationFrameIdRef = useRef<number>();
   const isAudioSetup = useRef(false);
+
+  const handleInteraction = async () => {
+    if (!isAudioContextStarted) {
+      await Tone.start();
+      setIsAudioContextStarted(true);
+    }
+  };
 
   const handleSettingsChange = (newSettings: Partial<RainSettings>) => {
     setSettings(prev => ({ ...prev, ...newSettings }));
@@ -163,11 +170,6 @@ const RainSimulatorPage = () => {
     setRefreshKey(k => k + 1);
   }, []);
 
-  const startSimulation = async () => {
-    await Tone.start();
-    setIsStarted(true);
-  };
-
   const setupAudio = useCallback(() => {
     Tone.Destination.volume.value = -Infinity;
     const limiter = new Tone.Limiter(-6).toDestination();
@@ -180,7 +182,6 @@ const RainSimulatorPage = () => {
   }, []);
 
   useEffect(() => {
-    if (!isStarted) return;
     const bgCanvas = bgCanvasRef.current!; const rainCanvas = rainCanvasRef.current!;
     const bgCtx = bgCanvas.getContext('2d')!; const rainCtx = rainCanvas.getContext('2d')!;
     const aberrationColorGrid: any[] = []; const aberrationGridSize = 5;
@@ -323,7 +324,7 @@ const RainSimulatorPage = () => {
       if (animationFrameIdRef.current) cancelAnimationFrame(animationFrameIdRef.current);
       dropletsRef.current = [];
     };
-  }, [isStarted, createDroplet, populateDroplets, settings.backgroundUrl, settings.amount, settings.size, refreshKey]);
+  }, [createDroplet, populateDroplets, settings.backgroundUrl, settings.amount, settings.size, refreshKey]);
 
   useEffect(() => {
     if (settings.sound > 0 && !isAudioSetup.current) {
@@ -335,22 +336,8 @@ const RainSimulatorPage = () => {
     }
   }, [settings.sound, setupAudio]);
 
-  if (!isStarted) {
-    return (
-      <div className="w-screen h-screen flex items-center justify-center bg-black text-white p-4">
-        <div className="text-center">
-            <h1 className="text-4xl md:text-6xl font-bold mb-4">Rain Simulator</h1>
-            <p className="text-lg md:text-xl text-gray-300 mb-8">A calming, interactive water droplet experience.</p>
-            <Button onClick={startSimulation} size="lg" className="bg-blue-500 hover:bg-blue-600 text-white">
-                Start the Rain
-            </Button>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="w-screen h-screen bg-black overflow-hidden cursor-default">
+    <div onClick={handleInteraction} className="w-screen h-screen bg-black overflow-hidden cursor-default">
       <canvas ref={bgCanvasRef} className="absolute top-0 left-0 w-full h-full z-10" />
       <canvas ref={rainCanvasRef} className="absolute top-0 left-0 w-full h-full z-20" />
       <SettingsPanel settings={settings} onSettingsChange={handleSettingsChange} onRefresh={handleRefresh} />
