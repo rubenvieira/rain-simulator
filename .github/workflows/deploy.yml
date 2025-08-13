@@ -1,0 +1,70 @@
+name: Deploy to DigitalOcean Droplet
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        if: hashFiles('package.json') != ''
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install and Build for Node.js Project
+        if: hashFiles('package.json') != ''
+        run: |
+          npm install
+          npm run build
+      
+      - name: Verify SSH Key Secret
+        run: |
+          if [ -z "${{ secrets.DROPLET_SSH_KEY }}" ]; then
+            echo "::error::DROPLET_SSH_KEY secret is not set in the GitHub repository secrets. Please check the Supabase project's environment variables and the 'create-github-repo' Edge Function logs for validation errors."
+            exit 1
+          fi
+          echo "DROPLET_SSH_KEY secret is present. Proceeding with deployment."
+
+      - name: Deploy Node.js project
+        if: hashFiles('package.json') != ''
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          source: "dist/**"
+          target: "/var/www/rubenv.net/htdocs/tools/rain-simulator"
+          overwrite: true
+          strip_components: 1
+
+      - name: Deploy Static Site
+        if: hashFiles('package.json') == ''
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          source: "./"
+          target: "/var/www/rubenv.net/htdocs/tools/rain-simulator"
+          overwrite: true
+
+      - name: Clean up static site deployment
+        if: hashFiles('package.json') == ''
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          script: |
+            echo "Cleaning up deployment for rain-simulator..."
+            rm -rf /var/www/rubenv.net/htdocs/tools/rain-simulator/.git
+            rm -rf /var/www/rubenv.net/htdocs/tools/rain-simulator/.github
+            echo "Cleanup complete."
