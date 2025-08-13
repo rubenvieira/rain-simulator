@@ -178,21 +178,24 @@ const RainSimulatorPage = () => {
     const rainFilter = new Tone.AutoFilter({ frequency: '8n', baseFrequency: 600, octaves: 4, depth: 0.8 }).connect(reverb);
     const rainEQ = new Tone.EQ3({ low: -5, mid: -15, high: -25 }).connect(rainFilter);
     rainNoise.connect(rainEQ);
+
+    const sizzleNoise = new Tone.Noise("white").start();
+    const sizzleFilter = new Tone.Filter(7000, "highpass").connect(reverb);
+    sizzleNoise.connect(sizzleFilter);
     
     const patSynth = new Tone.PolySynth(Tone.Synth).connect(reverb);
     patSynth.set({
         oscillator: { type: 'sine' },
         envelope: {
             attack: 0.001,
-            decay: 0.15,
-            sustain: 0.05,
-            release: 0.2,
-            attackCurve: 'exponential'
-        }
+            decay: 0.05,
+            sustain: 0,
+            release: 0.1,
+        },
     });
-    patSynth.volume.value = -15;
+    patSynth.volume.value = -12;
 
-    audioNodesRef.current = { rainNoise, patSynth };
+    audioNodesRef.current = { rainNoise, sizzleNoise, patSynth };
     isAudioSetup.current = true;
   }, []);
 
@@ -206,10 +209,11 @@ const RainSimulatorPage = () => {
     const playPatSound = (droplet: Droplet) => {
       if (!isAudioSetup.current || !droplet || !audioNodesRef.current.patSynth) return;
       const { patSynth } = audioNodesRef.current;
-      const velocity = Math.min(1, 0.1 + (droplet.mass / 80));
-      const notes = ['C5', 'D5', 'E5', 'G5', 'A5', 'C6', 'D6'];
+      const velocity = Math.min(1, 0.2 + (droplet.mass / 100));
+      const notes = ['C6', 'E6', 'G6', 'A6', 'C7'];
       const note = notes[Math.floor(Math.random() * notes.length)];
-      patSynth.triggerAttackRelease(note, "16n", Tone.now(), velocity);
+      const duration = ['32n', '64n'][Math.floor(Math.random() * 2)];
+      patSynth.triggerAttackRelease(note, duration, Tone.now(), velocity);
     };
 
     const rgbToHsl = (r:number, g:number, b:number) => { r /= 255; g /= 255; b /= 255; const max = Math.max(r, g, b), min = Math.min(r, g, b); let h = 0, s = 0, l = (max + min) / 2; if (max !== min) { const d = max - min; s = l > 0.5 ? d / (2 - max - min) : d / (max + min); switch (max) { case r: h = (g - b) / d + (g < b ? 6 : 0); break; case g: h = (b - r) / d + 2; break; case b: h = (r - g) / d + 4; break; } h /= 6; } return [h, s, l]; };
@@ -343,13 +347,18 @@ const RainSimulatorPage = () => {
     if (isAudioContextStarted && settings.sound > 0 && !isAudioSetup.current) {
       setupAudio();
     }
-    if (isAudioSetup.current && audioNodesRef.current.rainNoise) {
-      const targetVolume = settings.sound === 0 ? -Infinity : (settings.sound / 100) * 25 - 30;
-      audioNodesRef.current.rainNoise.volume.rampTo(targetVolume, 0.5);
-      
-      if (audioNodesRef.current.patSynth) {
-          const patVolume = settings.sound === 0 ? -Infinity : -15 + (settings.sound / 100) * 10;
-          audioNodesRef.current.patSynth.volume.rampTo(patVolume, 0.5);
+    if (isAudioSetup.current) {
+      const { rainNoise, sizzleNoise, patSynth } = audioNodesRef.current;
+      if (rainNoise && sizzleNoise && patSynth) {
+        const masterVolume = settings.sound / 100;
+        const targetRainVolume = settings.sound === 0 ? -Infinity : (masterVolume * 25) - 30;
+        rainNoise.volume.rampTo(targetRainVolume, 0.5);
+        
+        const targetSizzleVolume = settings.sound === 0 ? -Infinity : (masterVolume * 30) - 45;
+        sizzleNoise.volume.rampTo(targetSizzleVolume, 0.5);
+
+        const targetPatVolume = settings.sound === 0 ? -Infinity : (masterVolume * 15) - 20;
+        patSynth.volume.rampTo(targetPatVolume, 0.5);
       }
     }
   }, [settings.sound, setupAudio, isAudioContextStarted]);
