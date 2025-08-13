@@ -179,8 +179,7 @@ const RainSimulatorPage = () => {
     if (!isStarted) return;
     const bgCanvas = bgCanvasRef.current!; const rainCanvas = rainCanvasRef.current!;
     const bgCtx = bgCanvas.getContext('2d')!; const rainCtx = rainCanvas.getContext('2d')!;
-    let lavaLampAnimationId: number; let lastLavaTime = 0;
-    const lavaBlobs: any[] = []; const aberrationColorGrid: any[] = []; const aberrationGridSize = 5;
+    const aberrationColorGrid: any[] = []; const aberrationGridSize = 5;
     let frameCount = 0; let lastSoundTime = 0; const minSoundInterval = 50;
     let currentSoundProbability = 0.2;
 
@@ -200,9 +199,82 @@ const RainSimulatorPage = () => {
     const drawCoverImage = (ctx: CanvasRenderingContext2D, img: HTMLImageElement) => { const cA = ctx.canvas.width / ctx.canvas.height; const iA = img.naturalWidth / img.naturalHeight; let sx, sy, sW, sH; if (iA > cA) { sH = img.naturalHeight; sW = sH * cA; sx = (img.naturalWidth - sW) / 2; sy = 0; } else { sW = img.naturalWidth; sH = sW / cA; sx = 0; sy = (img.naturalHeight - sH) / 2; } ctx.drawImage(img, sx, sy, sW, sH, 0, 0, ctx.canvas.width, ctx.canvas.height); };
     
     const updateAberrationGrid = () => { if (bgCanvas.width === 0) return; aberrationColorGrid.length = 0; for (let y = 0; y < aberrationGridSize; y++) for (let x = 0; x < aberrationGridSize; x++) { const sX = Math.floor((x / (aberrationGridSize - 1)) * (bgCanvas.width - 1)); const sY = Math.floor((y / (aberrationGridSize - 1)) * (bgCanvas.height - 1)); try { const p = bgCtx.getImageData(sX, sY, 1, 1).data; const [h, s, l] = rgbToHsl(p[0], p[1], p[2]); aberrationColorGrid.push({ fringe1: hslToRgb((h + 0.1) % 1, s, l), fringe2: hslToRgb((h - 0.1 + 1) % 1, s, l) }); } catch (e) { aberrationColorGrid.push(null); } } };
-    const setupLavaLamp = () => { lavaBlobs.length = 0; if (bgCanvas.width === 0) return; let baseHue = Math.random() * 360; let useSameColor = Math.random() < 0.1; for (let i = 0; i < 5; i++) { const hue = useSameColor ? baseHue : Math.random() * 360; lavaBlobs.push({ x: Math.random() * bgCanvas.width, y: Math.random() * bgCanvas.height, r: 150 + Math.random() * 100, vx: (Math.random() - .5) * 2, vy: (Math.random() - .5) * 2, color: `hsl(${hue}, ${80 + Math.random() * 20}%, ${50 + Math.random() * 20}%)` }); } };
-    const drawLavaBlobs = () => { bgCtx.clearRect(0, 0, bgCanvas.width, bgCanvas.height); bgCtx.filter = 'blur(50px)'; lavaBlobs.forEach(b => { bgCtx.beginPath(); bgCtx.fillStyle = b.color; bgCtx.arc(b.x, b.y, b.r, 0, 2 * Math.PI); bgCtx.fill(); }); bgCtx.filter = 'none'; };
-    const animateLavaLamp = (timestamp: number) => { if (!userImageRef.current) { lavaLampAnimationId = requestAnimationFrame(animateLavaLamp); if (timestamp - lastLavaTime > 1000 / 2) { lastLavaTime = timestamp; lavaBlobs.forEach(b => { b.x += b.vx; b.y += b.vy; if (b.x > bgCanvas.width + b.r) b.x = -b.r; if (b.x < -b.r) b.x = bgCanvas.width + b.r; if (b.y > bgCanvas.height + b.r) b.y = -b.r; if (b.y < -b.r) b.y = bgCanvas.height + b.r; }); drawLavaBlobs(); } } };
+    
+    const drawBokehCityBackground = () => {
+        if (bgCanvas.width === 0 || bgCanvas.height === 0) return;
+        
+        const buildingColor = '#1a1a1d';
+        const roadColor = '#222225';
+        const skyColor = '#2c3e50';
+
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = bgCanvas.width;
+        tempCanvas.height = bgCanvas.height;
+        const tempCtx = tempCanvas.getContext('2d')!;
+
+        tempCtx.fillStyle = skyColor;
+        tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+
+        const horizonY = tempCanvas.height * 0.6;
+        tempCtx.fillStyle = roadColor;
+        tempCtx.beginPath();
+        tempCtx.moveTo(tempCanvas.width * 0.2, tempCanvas.height);
+        tempCtx.lineTo(tempCanvas.width * 0.45, horizonY);
+        tempCtx.lineTo(tempCanvas.width * 0.55, horizonY);
+        tempCtx.lineTo(tempCanvas.width * 0.8, tempCanvas.height);
+        tempCtx.closePath();
+        tempCtx.fill();
+
+        tempCtx.fillStyle = buildingColor;
+        tempCtx.beginPath();
+        tempCtx.moveTo(0, horizonY * 0.8);
+        tempCtx.lineTo(tempCanvas.width * 0.35, horizonY * 0.9);
+        tempCtx.lineTo(tempCanvas.width * 0.3, tempCanvas.height);
+        tempCtx.lineTo(0, tempCanvas.height);
+        tempCtx.closePath();
+        tempCtx.fill();
+
+        tempCtx.beginPath();
+        tempCtx.moveTo(tempCanvas.width, horizonY * 0.85);
+        tempCtx.lineTo(tempCanvas.width * 0.65, horizonY * 0.95);
+        tempCtx.lineTo(tempCanvas.width * 0.7, tempCanvas.height);
+        tempCtx.lineTo(tempCanvas.width, tempCanvas.height);
+        tempCtx.closePath();
+        tempCtx.fill();
+
+        bgCtx.save();
+        bgCtx.filter = 'blur(8px)';
+        bgCtx.drawImage(tempCanvas, 0, 0);
+        bgCtx.restore();
+
+        const lightColors = ['#ffdd44', '#ffbb33', '#ff8811', '#ff5500', '#ff2200', '#ffffff'];
+        const numLights = 250;
+
+        for (let i = 0; i < numLights; i++) {
+            const y = horizonY * 0.95 + Math.random() * (bgCanvas.height - horizonY * 0.95);
+            const perspective = (y - horizonY) / (bgCanvas.height - horizonY);
+
+            const x = Math.random() * bgCanvas.width;
+            const radius = (perspective * perspective * 25) + 2;
+            const color = lightColors[Math.floor(Math.random() * lightColors.length)];
+            const opacity = 0.2 + perspective * 0.6;
+
+            bgCtx.beginPath();
+            const gradient = bgCtx.createRadialGradient(x, y, 0, x, y, radius);
+            const rgbColor = color.replace('#', '');
+            const r = parseInt(rgbColor.substring(0, 2), 16);
+            const g = parseInt(rgbColor.substring(2, 4), 16);
+            const b = parseInt(rgbColor.substring(4, 6), 16);
+
+            gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${opacity})`);
+            gradient.addColorStop(0.4, `rgba(${r}, ${g}, ${b}, ${opacity * 0.5})`);
+            gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+            
+            bgCtx.fillStyle = gradient;
+            bgCtx.arc(x, y, radius, 0, Math.PI * 2);
+            bgCtx.fill();
+        }
+    };
 
     const animate = () => {
       rainCtx.clearRect(0, 0, rainCanvas.width, rainCanvas.height);
@@ -220,8 +292,14 @@ const RainSimulatorPage = () => {
     const resizeAll = () => {
       rainCanvas.width = bgCanvas.width = window.innerWidth;
       rainCanvas.height = bgCanvas.height = window.innerHeight;
-      if (userImageRef.current && userImageRef.current.complete) { bgCtx.filter = 'blur(3px)'; drawCoverImage(bgCtx, userImageRef.current); bgCtx.filter = 'none'; updateAberrationGrid(); }
-      else { setupLavaLamp(); drawLavaBlobs(); }
+      if (userImageRef.current && userImageRef.current.complete) {
+        bgCtx.filter = 'blur(3px)';
+        drawCoverImage(bgCtx, userImageRef.current);
+        bgCtx.filter = 'none';
+      } else {
+        drawBokehCityBackground();
+      }
+      updateAberrationGrid();
     };
 
     if (settings.backgroundUrl) { const img = new Image(); img.crossOrigin = "anonymous"; img.src = settings.backgroundUrl; img.onload = () => { userImageRef.current = img; resizeAll(); }; }
@@ -229,14 +307,12 @@ const RainSimulatorPage = () => {
 
     resizeAll();
     handleRefresh();
-    if (!userImageRef.current) animateLavaLamp(0);
     animate();
     window.addEventListener('resize', resizeAll);
 
     return () => {
       window.removeEventListener('resize', resizeAll);
       if (animationFrameIdRef.current) cancelAnimationFrame(animationFrameIdRef.current);
-      if (lavaLampAnimationId) cancelAnimationFrame(lavaLampAnimationId);
       dropletsRef.current = [];
     };
   }, [isStarted, createDroplet, handleRefresh, settings.backgroundUrl, settings.amount, settings.size]);
