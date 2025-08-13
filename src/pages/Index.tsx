@@ -130,6 +130,7 @@ class Droplet {
 const RainSimulatorPage = () => {
   const [settings, setSettings] = useState<RainSettings>({ amount: 700, size: 4, speed: 5, stickiness: 4, sound: 0, backgroundUrl: null });
   const [isStarted, setIsStarted] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const rainCanvasRef = useRef<HTMLCanvasElement>(null);
   const dropletsRef = useRef<Droplet[]>([]);
@@ -154,10 +155,13 @@ const RainSimulatorPage = () => {
     dropletsRef.current.push(newDroplet);
   }, [settings]);
 
-  const handleRefresh = useCallback(() => {
-    dropletsRef.current = [];
+  const populateDroplets = useCallback(() => {
     for (let i = 0; i < settings.amount / 4; i++) createDroplet();
   }, [settings.amount, createDroplet]);
+
+  const handleRefresh = useCallback(() => {
+    setRefreshKey(k => k + 1);
+  }, []);
 
   const startSimulation = async () => {
     await Tone.start();
@@ -203,9 +207,13 @@ const RainSimulatorPage = () => {
     const drawBokehCityBackground = () => {
         if (bgCanvas.width === 0 || bgCanvas.height === 0) return;
         
-        const buildingColor = '#1a1a1d';
-        const roadColor = '#222225';
-        const skyColor = '#2c3e50';
+        const palettes = [
+            { sky: '#2c3e50', road: '#222225', building: '#1a1a1d', lights: ['#ffdd44', '#ffbb33', '#ff8811', '#ff5500', '#ff2200', '#ffffff'] },
+            { sky: '#1c2541', road: '#0b132b', building: '#000000', lights: ['#aaddff', '#88ccff', '#66bbff', '#ffffff', '#ffdd44'] },
+            { sky: '#4b2c30', road: '#3d2225', building: '#301a1d', lights: ['#ff8c69', '#ff6347', '#ff4500', '#ffffff'] },
+            { sky: '#000000', road: '#111111', building: '#080808', lights: ['#ff00ff', '#00ffff', '#ffff00', '#ffffff'] }
+        ];
+        const { sky: skyColor, road: roadColor, building: buildingColor, lights: lightColors } = palettes[Math.floor(Math.random() * palettes.length)];
 
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = bgCanvas.width;
@@ -215,49 +223,49 @@ const RainSimulatorPage = () => {
         tempCtx.fillStyle = skyColor;
         tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
 
-        const horizonY = tempCanvas.height * 0.6;
+        const horizonY = tempCanvas.height * (0.5 + Math.random() * 0.2);
+        const roadCenterX = tempCanvas.width * (0.4 + Math.random() * 0.2);
+        const roadVanishingWidth = tempCanvas.width * (0.02 + Math.random() * 0.08);
+        const roadBottomWidth = tempCanvas.width * (0.6 + Math.random() * 0.4);
+
         tempCtx.fillStyle = roadColor;
         tempCtx.beginPath();
-        tempCtx.moveTo(tempCanvas.width * 0.2, tempCanvas.height);
-        tempCtx.lineTo(tempCanvas.width * 0.45, horizonY);
-        tempCtx.lineTo(tempCanvas.width * 0.55, horizonY);
-        tempCtx.lineTo(tempCanvas.width * 0.8, tempCanvas.height);
+        tempCtx.moveTo(roadCenterX - roadBottomWidth / 2, tempCanvas.height);
+        tempCtx.lineTo(roadCenterX - roadVanishingWidth / 2, horizonY);
+        tempCtx.lineTo(roadCenterX + roadVanishingWidth / 2, horizonY);
+        tempCtx.lineTo(roadCenterX + roadBottomWidth / 2, tempCanvas.height);
         tempCtx.closePath();
         tempCtx.fill();
 
         tempCtx.fillStyle = buildingColor;
-        tempCtx.beginPath();
-        tempCtx.moveTo(0, horizonY * 0.8);
-        tempCtx.lineTo(tempCanvas.width * 0.35, horizonY * 0.9);
-        tempCtx.lineTo(tempCanvas.width * 0.3, tempCanvas.height);
-        tempCtx.lineTo(0, tempCanvas.height);
-        tempCtx.closePath();
-        tempCtx.fill();
-
-        tempCtx.beginPath();
-        tempCtx.moveTo(tempCanvas.width, horizonY * 0.85);
-        tempCtx.lineTo(tempCanvas.width * 0.65, horizonY * 0.95);
-        tempCtx.lineTo(tempCanvas.width * 0.7, tempCanvas.height);
-        tempCtx.lineTo(tempCanvas.width, tempCanvas.height);
-        tempCtx.closePath();
-        tempCtx.fill();
+        const buildingPasses = 3;
+        for (let p = 0; p < buildingPasses; p++) {
+            const buildingCount = 5 + Math.floor(Math.random() * 10);
+            const maxBuildingHeight = (tempCanvas.height - horizonY) * (1 - p * 0.2);
+            for (let i = 0; i < buildingCount; i++) {
+                const x = Math.random() * tempCanvas.width;
+                const width = 50 + Math.random() * 150;
+                const height = (0.2 + Math.random() * 0.8) * maxBuildingHeight;
+                const y = horizonY - height * (0.1 + Math.random() * 0.2);
+                tempCtx.globalAlpha = 0.6 + Math.random() * 0.4;
+                tempCtx.fillRect(x, y, width, tempCanvas.height - y);
+            }
+        }
+        tempCtx.globalAlpha = 1.0;
 
         bgCtx.save();
         bgCtx.filter = 'blur(8px)';
         bgCtx.drawImage(tempCanvas, 0, 0);
         bgCtx.restore();
 
-        const lightColors = ['#ffdd44', '#ffbb33', '#ff8811', '#ff5500', '#ff2200', '#ffffff'];
-        const numLights = 250;
-
+        const numLights = 200 + Math.floor(Math.random() * 150);
         for (let i = 0; i < numLights; i++) {
-            const y = horizonY * 0.95 + Math.random() * (bgCanvas.height - horizonY * 0.95);
+            const y = horizonY * 0.9 + Math.random() * (bgCanvas.height - horizonY * 0.9);
             const perspective = (y - horizonY) / (bgCanvas.height - horizonY);
-
             const x = Math.random() * bgCanvas.width;
             const radius = (perspective * perspective * 25) + 2;
             const color = lightColors[Math.floor(Math.random() * lightColors.length)];
-            const opacity = 0.2 + perspective * 0.6;
+            const opacity = 0.2 + perspective * 0.6 + Math.random() * 0.2;
 
             bgCtx.beginPath();
             const gradient = bgCtx.createRadialGradient(x, y, 0, x, y, radius);
@@ -306,7 +314,7 @@ const RainSimulatorPage = () => {
     else { userImageRef.current = null; }
 
     resizeAll();
-    handleRefresh();
+    populateDroplets();
     animate();
     window.addEventListener('resize', resizeAll);
 
@@ -315,7 +323,7 @@ const RainSimulatorPage = () => {
       if (animationFrameIdRef.current) cancelAnimationFrame(animationFrameIdRef.current);
       dropletsRef.current = [];
     };
-  }, [isStarted, createDroplet, handleRefresh, settings.backgroundUrl, settings.amount, settings.size]);
+  }, [isStarted, createDroplet, populateDroplets, settings.backgroundUrl, settings.amount, settings.size, refreshKey]);
 
   useEffect(() => {
     if (settings.sound > 0 && !isAudioSetup.current) {
