@@ -12,6 +12,7 @@ export interface RainSettings {
   stickiness: number;
   sound: number;
   backgroundUrl: string | null;
+  thunder: boolean;
 }
 
 interface DropletPoint { x: number; y: number; }
@@ -128,9 +129,10 @@ class Droplet {
 }
 
 const RainSimulatorPage = () => {
-  const [settings, setSettings] = useState<RainSettings>({ amount: 700, size: 4, speed: 5, stickiness: 4, sound: 0, backgroundUrl: null });
+  const [settings, setSettings] = useState<RainSettings>({ amount: 700, size: 4, speed: 5, stickiness: 4, sound: 0, backgroundUrl: null, thunder: false });
   const [refreshKey, setRefreshKey] = useState(0);
   const [isAudioContextStarted, setIsAudioContextStarted] = useState(false);
+  const [lightningOpacity, setLightningOpacity] = useState(0);
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const rainCanvasRef = useRef<HTMLCanvasElement>(null);
   const dropletsRef = useRef<Droplet[]>([]);
@@ -186,18 +188,47 @@ const RainSimulatorPage = () => {
     const patSynth = new Tone.PolySynth(Tone.Synth).connect(reverb);
     patSynth.set({
         oscillator: { type: 'sine' },
-        envelope: {
-            attack: 0.001,
-            decay: 0.05,
-            sustain: 0,
-            release: 0.1,
-        },
+        envelope: { attack: 0.001, decay: 0.05, sustain: 0, release: 0.1 },
     });
     patSynth.volume.value = -12;
 
-    audioNodesRef.current = { rainNoise, sizzleNoise, patSynth };
+    const thunderSynth = new Tone.NoiseSynth({
+        noise: { type: 'brown' },
+        envelope: { attack: 0.01, decay: 0.5, sustain: 0.2, release: 1.5 }
+    }).connect(reverb);
+    thunderSynth.volume.value = -5;
+
+    audioNodesRef.current = { rainNoise, sizzleNoise, patSynth, thunderSynth };
     isAudioSetup.current = true;
   }, []);
+
+  const triggerLightning = useCallback(() => {
+    setLightningOpacity(0.8);
+    setTimeout(() => setLightningOpacity(0), 50);
+    setTimeout(() => setLightningOpacity(0.5), 150);
+    setTimeout(() => setLightningOpacity(0), 200);
+
+    const delay = 500 + Math.random() * 1500;
+    setTimeout(() => {
+        if (isAudioSetup.current && audioNodesRef.current.thunderSynth) {
+            audioNodesRef.current.thunderSynth.triggerAttackRelease("2n");
+        }
+    }, delay);
+  }, []);
+
+  useEffect(() => {
+    if (!settings.thunder || !isAudioContextStarted) return;
+    let timeoutId: number;
+    const scheduleThunder = () => {
+        const delay = 15000 + Math.random() * 30000;
+        timeoutId = window.setTimeout(() => {
+            triggerLightning();
+            scheduleThunder();
+        }, delay);
+    };
+    scheduleThunder();
+    return () => clearTimeout(timeoutId);
+  }, [settings.thunder, isAudioContextStarted, triggerLightning]);
 
   useEffect(() => {
     const bgCanvas = bgCanvasRef.current!; const rainCanvas = rainCanvasRef.current!;
@@ -348,8 +379,8 @@ const RainSimulatorPage = () => {
       setupAudio();
     }
     if (isAudioSetup.current) {
-      const { rainNoise, sizzleNoise, patSynth } = audioNodesRef.current;
-      if (rainNoise && sizzleNoise && patSynth) {
+      const { rainNoise, sizzleNoise, patSynth, thunderSynth } = audioNodesRef.current;
+      if (rainNoise && sizzleNoise && patSynth && thunderSynth) {
         const masterVolume = settings.sound / 100;
         const targetRainVolume = settings.sound === 0 ? -Infinity : (masterVolume * 25) - 30;
         rainNoise.volume.rampTo(targetRainVolume, 0.5);
@@ -359,6 +390,9 @@ const RainSimulatorPage = () => {
 
         const targetPatVolume = settings.sound === 0 ? -Infinity : (masterVolume * 15) - 20;
         patSynth.volume.rampTo(targetPatVolume, 0.5);
+
+        const targetThunderVolume = settings.sound === 0 ? -Infinity : -5;
+        thunderSynth.volume.rampTo(targetThunderVolume, 0.5);
       }
     }
   }, [settings.sound, setupAudio, isAudioContextStarted]);
@@ -367,6 +401,10 @@ const RainSimulatorPage = () => {
     <div onClick={handleInteraction} className="w-screen h-screen bg-black overflow-hidden cursor-default">
       <canvas ref={bgCanvasRef} className="absolute top-0 left-0 w-full h-full z-10" />
       <canvas ref={rainCanvasRef} className="absolute top-0 left-0 w-full h-full z-20" />
+      <div 
+        className="absolute top-0 left-0 w-full h-full bg-white z-30 pointer-events-none"
+        style={{ opacity: lightningOpacity, transition: 'opacity 50ms ease-in-out' }}
+      />
       <SettingsPanel settings={settings} onSettingsChange={handleSettingsChange} onRefresh={handleRefresh} />
     </div>
   );
