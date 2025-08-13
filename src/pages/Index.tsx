@@ -50,20 +50,6 @@ class Droplet {
     return points;
   }
 
-  _drawBlobShape(points: DropletPoint[], x: number, y: number): Path2D {
-    if (points.length < 2) return new Path2D();
-    const path = new Path2D();
-    path.moveTo(x + points[0].x, y + points[0].y);
-    for (let i = 1; i <= points.length; i++) {
-      const p1 = points[i - 1];
-      const p2 = points[i % points.length];
-      const xc = (p1.x + p2.x) / 2 + x;
-      const yc = (p1.y + p2.y) / 2 + y;
-      path.quadraticCurveTo(x + p1.x, y + p1.y, xc, yc);
-    }
-    return path;
-  }
-
   update(dynamicSwayIntensity: number, droplets: Droplet[], createDropletCallback: (x: number, y: number, mass: number, radius: number) => void) {
     if (this.opacity < 1) this.opacity += 0.05;
     this.points.forEach(p => { p.x += (Math.random() - 0.5) * 0.2; p.y += (Math.random() - 0.5) * 0.2; });
@@ -96,72 +82,40 @@ class Droplet {
   }
 
   draw(rainCtx: CanvasRenderingContext2D, bgCanvas: HTMLCanvasElement, aberrationColorGrid: any[], aberrationGridSize: number) {
-    const path = this._drawBlobShape(this.points, this.x, this.y);
-
-    // 1. Refraction: Draw the distorted background inside the droplet
-    rainCtx.save();
-    rainCtx.clip(path);
-    const distortion = this.radius * 0.3;
+    const _drawBlobShape = (points: DropletPoint[], x: number, y: number) => {
+      if (points.length < 2) return new Path2D();
+      const path = new Path2D(); path.moveTo(x + points[0].x, y + points[0].y);
+      for (let i = 1; i <= points.length; i++) {
+        const p1 = points[i - 1]; const p2 = points[i % points.length];
+        const xc = (p1.x + p2.x) / 2 + x; const yc = (p1.y + p2.y) / 2 + y;
+        path.quadraticCurveTo(x + p1.x, y + p1.y, xc, yc);
+      }
+      return path;
+    };
+    const path = _drawBlobShape(this.points, this.x, this.y);
+    rainCtx.save(); rainCtx.globalAlpha = 0.85; rainCtx.clip(path);
+    const distortion = this.radius * 0.45;
     if (bgCanvas.width > 0 && bgCanvas.height > 0) {
-      try {
-        rainCtx.drawImage(
-          bgCanvas,
-          this.x - this.radius - distortion, this.y - this.radius - distortion,
-          (this.radius + distortion) * 2, (this.radius + distortion) * 2,
-          this.x - this.radius, this.y - this.radius,
-          this.radius * 2, this.radius * 2
-        );
-      } catch (e) { /* ignore */ }
+      try { rainCtx.drawImage(bgCanvas, this.x - this.radius - distortion, this.y - this.radius - distortion, (this.radius + distortion) * 2, (this.radius + distortion) * 2, this.x - this.radius, this.y - this.radius, this.radius * 2, this.radius * 2); } catch (e) { /* ignore */ }
+      const gridX = Math.max(0, Math.min(aberrationGridSize - 1, Math.floor((this.x / rainCtx.canvas.width) * aberrationGridSize)));
+      const gridY = Math.max(0, Math.min(aberrationGridSize - 1, Math.floor((this.y / rainCtx.canvas.height) * aberrationGridSize)));
+      const colors = aberrationColorGrid[gridY * aberrationGridSize + gridX];
+      if (colors) {
+        rainCtx.globalCompositeOperation = 'lighter';
+        const fringeGradient = rainCtx.createRadialGradient(this.x, this.y, this.radius * 0.6, this.x, this.y, this.radius);
+        fringeGradient.addColorStop(0, 'rgba(255, 255, 255, 0)');
+        fringeGradient.addColorStop(0.85, `rgba(${colors.fringe1[0]}, ${colors.fringe1[1]}, ${colors.fringe1[2]}, 0.25)`);
+        fringeGradient.addColorStop(0.95, `rgba(${colors.fringe2[0]}, ${colors.fringe2[1]}, ${colors.fringe2[2]}, 0.25)`);
+        rainCtx.fillStyle = fringeGradient; rainCtx.fill(path);
+      }
     }
-    
-    // 2. Chromatic Aberration: Add colored fringes for a glassy effect
-    const gridX = Math.max(0, Math.min(aberrationGridSize - 1, Math.floor((this.x / rainCtx.canvas.width) * aberrationGridSize)));
-    const gridY = Math.max(0, Math.min(aberrationGridSize - 1, Math.floor((this.y / rainCtx.canvas.height) * aberrationGridSize)));
-    const colors = aberrationColorGrid[gridY * aberrationGridSize + gridX];
-    if (colors) {
-      rainCtx.globalCompositeOperation = 'lighter';
-      const fringeGradient = rainCtx.createRadialGradient(this.x, this.y, this.radius * 0.7, this.x, this.y, this.radius);
-      fringeGradient.addColorStop(0, 'rgba(255, 255, 255, 0)');
-      fringeGradient.addColorStop(0.8, `rgba(${colors.fringe1[0]}, ${colors.fringe1[1]}, ${colors.fringe1[2]}, 0.15)`);
-      fringeGradient.addColorStop(1, `rgba(${colors.fringe2[0]}, ${colors.fringe2[1]}, ${colors.fringe2[2]}, 0.2)`);
-      rainCtx.fillStyle = fringeGradient;
-      rainCtx.fill();
-    }
-    rainCtx.restore();
-
-    // 3. Lighting: Add highlights and shadows to give it a 3D look
-    rainCtx.save();
-    rainCtx.clip(path);
-    
-    // Inner shadow for depth
-    rainCtx.globalCompositeOperation = 'source-over';
-    const innerShadowGradient = rainCtx.createLinearGradient(
-        this.x, this.y - this.radius,
-        this.x, this.y + this.radius
-    );
-    innerShadowGradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
-    innerShadowGradient.addColorStop(0.7, 'rgba(0, 0, 0, 0.05)');
-    innerShadowGradient.addColorStop(1, 'rgba(0, 0, 0, 0.2)');
-    rainCtx.fillStyle = innerShadowGradient;
-    rainCtx.fill();
-
-    // Main highlight
-    const highlightGradient = rainCtx.createRadialGradient(
-        this.x - this.radius * 0.4, this.y - this.radius * 0.5, 0,
-        this.x - this.radius * 0.4, this.y - this.radius * 0.5, this.radius * 0.7
-    );
-    highlightGradient.addColorStop(0, 'rgba(255, 255, 255, 0.7)');
-    highlightGradient.addColorStop(0.25, 'rgba(255, 255, 255, 0.5)');
-    highlightGradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
-    rainCtx.fillStyle = highlightGradient;
-    rainCtx.fill();
-
-    rainCtx.restore();
-
-    // 4. Outer border: A subtle border to define the edge
-    rainCtx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
-    rainCtx.lineWidth = 1;
-    rainCtx.stroke(path);
+    rainCtx.restore(); rainCtx.save();
+    const grad1 = rainCtx.createRadialGradient(this.x - this.radius * 0.4, this.y - this.radius * 0.5, 0, this.x - this.radius * 0.4, this.y - this.radius * 0.5, this.radius * 0.5);
+    grad1.addColorStop(0, 'rgba(255, 255, 255, 0.9)'); grad1.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    rainCtx.fillStyle = grad1; rainCtx.fill(path);
+    const grad2 = rainCtx.createRadialGradient(this.x + this.radius * 0.4, this.y + this.radius * 0.4, this.radius * 0.5, this.x + this.radius * 0.4, this.y + this.radius * 0.4, this.radius);
+    grad2.addColorStop(0, 'rgba(0, 0, 0, 0)'); grad2.addColorStop(1, 'rgba(0, 0, 0, 0.4)');
+    rainCtx.fillStyle = grad2; rainCtx.fill(path); rainCtx.restore();
   }
 
   isCollidingWith(other: Droplet): boolean { const dx = this.x - other.x; const dy = this.y - other.y; return Math.sqrt(dx * dx + dy * dy) < (this.radius + other.radius) * 0.75; }
