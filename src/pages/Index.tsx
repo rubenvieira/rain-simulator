@@ -179,15 +179,22 @@ const RainSimulatorPage = () => {
     const rainEQ = new Tone.EQ3({ low: -5, mid: -15, high: -25 }).connect(rainFilter);
     rainNoise.connect(rainEQ);
     
-    const patSynth = new Tone.PolySynth(Tone.PluckSynth as any).connect(reverb);
+    const patSynth = new Tone.PolySynth(Tone.MembraneSynth).connect(reverb);
     patSynth.set({
-      attackNoise: 0.8,
-      dampening: 8000,
-      resonance: 0.9,
-      release: 0.5,
-    } as any);
+        pitchDecay: 0.01,
+        octaves: 6,
+        oscillator: {
+            type: 'sine'
+        },
+        envelope: {
+            attack: 0.001,
+            decay: 0.2,
+            sustain: 0.01,
+            release: 0.4,
+            attackCurve: 'exponential'
+        }
+    });
     patSynth.volume.value = -10;
-    patSynth.maxPolyphony = 20;
 
     audioNodesRef.current = { rainNoise, patSynth };
     isAudioSetup.current = true;
