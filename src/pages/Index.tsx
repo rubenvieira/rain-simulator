@@ -136,6 +136,11 @@ const RainSimulatorPage = () => {
   const userImageRef = useRef<HTMLImageElement | null>(null);
   const audioNodesRef = useRef<any>({});
   const animationFrameIdRef = useRef<number>();
+  const isAudioSetup = useRef(false);
+
+  const handleSettingsChange = (newSettings: Partial<RainSettings>) => {
+    setSettings(prev => ({ ...prev, ...newSettings }));
+  };
 
   const createDroplet = useCallback((x?: number, y?: number, mass?: number, radius?: number) => {
     const rainCanvas = rainCanvasRef.current; if (!rainCanvas) return;
@@ -159,27 +164,28 @@ const RainSimulatorPage = () => {
     setIsStarted(true);
   };
 
+  const setupAudio = useCallback(() => {
+    Tone.Destination.volume.value = -Infinity;
+    const limiter = new Tone.Limiter(-6).toDestination();
+    const lowpass = new Tone.Filter(3500, "lowpass").connect(limiter);
+    const reverb = new Tone.Reverb({ decay: 1.5, wet: 0.4 }).connect(lowpass);
+    const patSynth = new Tone.PolySynth(Tone.MembraneSynth, { pitchDecay: 0.03, octaves: 3, envelope: { attack: 0.005, decay: 0.25, sustain: 0.01, release: 0.1 } }).connect(reverb);
+    patSynth.maxPolyphony = 8;
+    audioNodesRef.current = { patSynth };
+    isAudioSetup.current = true;
+  }, []);
+
   useEffect(() => {
     if (!isStarted) return;
     const bgCanvas = bgCanvasRef.current!; const rainCanvas = rainCanvasRef.current!;
     const bgCtx = bgCanvas.getContext('2d')!; const rainCtx = rainCanvas.getContext('2d')!;
-    let isAudioSetup = false; let lavaLampAnimationId: number; let lastLavaTime = 0;
+    let lavaLampAnimationId: number; let lastLavaTime = 0;
     const lavaBlobs: any[] = []; const aberrationColorGrid: any[] = []; const aberrationGridSize = 5;
     let frameCount = 0; let lastSoundTime = 0; const minSoundInterval = 50;
     let currentSoundProbability = 0.2;
 
-    const setupAudio = () => {
-      Tone.Destination.volume.value = -Infinity;
-      const limiter = new Tone.Limiter(-6).toDestination();
-      const lowpass = new Tone.Filter(3500, "lowpass").connect(limiter);
-      const reverb = new Tone.Reverb({ decay: 1.5, wet: 0.4 }).connect(lowpass);
-      const patSynth = new Tone.PolySynth(Tone.MembraneSynth, { pitchDecay: 0.03, octaves: 3, envelope: { attack: 0.005, decay: 0.25, sustain: 0.01, release: 0.1 } }).connect(reverb);
-      patSynth.set({ "maxPolyphony": 8 });
-      audioNodesRef.current = { patSynth }; isAudioSetup = true;
-    };
-
     const playPatSound = (droplet: Droplet) => {
-      if (!isAudioSetup || !droplet) return;
+      if (!isAudioSetup.current || !droplet) return;
       const { patSynth } = audioNodesRef.current;
       const baseMass = 10 + Math.pow(settings.size, 3.2);
       const maxMass = baseMass + 10;
@@ -206,7 +212,7 @@ const RainSimulatorPage = () => {
       currentSoundProbability += ((0.1 + (normDrops * (0.4 - 0.1))) - currentSoundProbability) * 0.02;
       for (let i = 0; i < 5; i++) if (Math.random() < settings.amount / 1500) createDroplet();
       const now = performance.now();
-      if (isAudioSetup && Tone.Destination.volume.value > -Infinity && now - lastSoundTime > minSoundInterval && Math.random() < currentSoundProbability && dropletsRef.current.length > 0) { playPatSound(dropletsRef.current[Math.floor(Math.random() * dropletsRef.current.length)]); lastSoundTime = now; }
+      if (isAudioSetup.current && Tone.Destination.volume.value > -Infinity && now - lastSoundTime > minSoundInterval && Math.random() < currentSoundProbability && dropletsRef.current.length > 0) { playPatSound(dropletsRef.current[Math.floor(Math.random() * dropletsRef.current.length)]); lastSoundTime = now; }
       for (let i = dropletsRef.current.length - 1; i >= 0; i--) { const d = dropletsRef.current[i]; d.update(dynamicSwayIntensity, dropletsRef.current, createDroplet); if (d.y - d.radius > rainCanvas.height) dropletsRef.current.splice(i, 1); else d.draw(rainCtx, bgCanvas, aberrationColorGrid, aberrationGridSize); }
       animationFrameIdRef.current = requestAnimationFrame(animate);
     };
@@ -233,12 +239,17 @@ const RainSimulatorPage = () => {
       if (lavaLampAnimationId) cancelAnimationFrame(lavaLampAnimationId);
       dropletsRef.current = [];
     };
-  }, [isStarted, createDroplet, handleRefresh, settings.backgroundUrl]);
+  }, [isStarted, createDroplet, handleRefresh, settings.backgroundUrl, settings.amount, settings.size]);
 
   useEffect(() => {
-    if (!isAudioSetup) { if (settings.sound > 0) setupAudio(); }
-    else { const targetVolume = settings.sound === 0 ? -Infinity : (settings.sound / 100) * 40 - 45; Tone.Destination.volume.rampTo(targetVolume, 0.5); }
-  }, [settings.sound]);
+    if (settings.sound > 0 && !isAudioSetup.current) {
+      setupAudio();
+    }
+    if (isAudioSetup.current) {
+      const targetVolume = settings.sound === 0 ? -Infinity : (settings.sound / 100) * 40 - 45;
+      Tone.Destination.volume.rampTo(targetVolume, 0.5);
+    }
+  }, [settings.sound, setupAudio]);
 
   if (!isStarted) {
     return (
@@ -258,7 +269,7 @@ const RainSimulatorPage = () => {
     <div className="w-screen h-screen bg-black overflow-hidden cursor-default">
       <canvas ref={bgCanvasRef} className="absolute top-0 left-0 w-full h-full z-10" />
       <canvas ref={rainCanvasRef} className="absolute top-0 left-0 w-full h-full z-20" />
-      <SettingsPanel settings={settings} onSettingsChange={setSettings} onRefresh={handleRefresh} />
+      <SettingsPanel settings={settings} onSettingsChange={handleSettingsChange} onRefresh={handleRefresh} />
     </div>
   );
 };
