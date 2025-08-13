@@ -121,6 +121,19 @@ export function SettingsPanel({ settings, onSettingsChange, onRefresh }: Setting
               onCheckedChange={(checked) => onSettingsChange({ thunder: checked })}
             />
           </div>
+          {settings.thunder && (
+            <div className="grid gap-3 pl-2 pr-2">
+              <Label htmlFor="thunder-frequency">Frequency ({settings.thunderFrequency})</Label>
+              <Slider
+                id="thunder-frequency"
+                min={1}
+                max={10}
+                step={1}
+                value={[settings.thunderFrequency]}
+                onValueChange={([value]) => onSettingsChange({ thunderFrequency: value })}
+              />
+            </div>
+          )}
           <Button onClick={onRefresh}>Refresh Rain</Button>
         </div>
       </SheetContent>

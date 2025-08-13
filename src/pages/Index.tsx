@@ -13,6 +13,7 @@ export interface RainSettings {
   sound: number;
   backgroundUrl: string | null;
   thunder: boolean;
+  thunderFrequency: number;
 }
 
 interface DropletPoint { x: number; y: number; }
@@ -129,7 +130,7 @@ class Droplet {
 }
 
 const RainSimulatorPage = () => {
-  const [settings, setSettings] = useState<RainSettings>({ amount: 700, size: 4, speed: 5, stickiness: 4, sound: 0, backgroundUrl: null, thunder: false });
+  const [settings, setSettings] = useState<RainSettings>({ amount: 700, size: 4, speed: 5, stickiness: 4, sound: 0, backgroundUrl: null, thunder: false, thunderFrequency: 5 });
   const [refreshKey, setRefreshKey] = useState(0);
   const [isAudioContextStarted, setIsAudioContextStarted] = useState(false);
   const [lightningOpacity, setLightningOpacity] = useState(0);
@@ -220,15 +221,19 @@ const RainSimulatorPage = () => {
     if (!settings.thunder || !isAudioContextStarted) return;
     let timeoutId: number;
     const scheduleThunder = () => {
-        const delay = 15000 + Math.random() * 30000;
+        const frequencyFactor = 11 - settings.thunderFrequency; // maps 1-10 to 10-1
+        const baseDelay = 4000 * frequencyFactor; // 40s for freq 1, 4s for freq 10
+        const randomDelay = baseDelay * Math.random();
+        const totalDelay = baseDelay + randomDelay;
+
         timeoutId = window.setTimeout(() => {
             triggerLightning();
             scheduleThunder();
-        }, delay);
+        }, totalDelay);
     };
     scheduleThunder();
     return () => clearTimeout(timeoutId);
-  }, [settings.thunder, isAudioContextStarted, triggerLightning]);
+  }, [settings.thunder, settings.thunderFrequency, isAudioContextStarted, triggerLightning]);
 
   useEffect(() => {
     const bgCanvas = bgCanvasRef.current!; const rainCanvas = rainCanvasRef.current!;
