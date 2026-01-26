@@ -1,472 +1,777 @@
 "use client";
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import * as Tone from 'tone';
-import { SettingsPanel } from '@/components/SettingsPanel';
+import { Settings, RotateCcw, Cloud, CloudRain, CloudLightning, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Slider } from '@/components/ui/slider';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from "@/components/ui/sheet";
 
-export interface RainSettings {
-  amount: number;
-  size: number;
+// ============================================================================
+// HYPER-REALISTIC RAIN SIMULATION
+// A single-file implementation for maximum control and debugging
+// ============================================================================
+
+interface RainDrop {
+  x: number;
+  y: number;
+  z: number; // depth for parallax
+  length: number;
   speed: number;
-  stickiness: number;
-  sound: number;
-  backgroundUrl: string | null;
+  opacity: number;
+  thickness: number;
+}
+
+interface WaterDrop {
+  x: number;
+  y: number;
+  radius: number;
+  vx: number;
+  vy: number;
+  stuck: boolean;
+  stuckTime: number;
+  mass: number;
+  wobble: number;
+  wobbleSpeed: number;
+}
+
+interface Splash {
+  x: number;
+  y: number;
+  radius: number;
+  maxRadius: number;
+  opacity: number;
+  rings: number;
+}
+
+interface Trail {
+  x: number;
+  y: number;
+  radius: number;
+  opacity: number;
+  age: number;
+}
+
+interface Settings {
+  intensity: number;
+  windStrength: number;
+  windAngle: number;
+  dropSize: number;
   thunder: boolean;
   thunderFrequency: number;
 }
 
-interface DropletPoint { x: number; y: number; }
+const DEFAULT_SETTINGS: Settings = {
+  intensity: 60,
+  windStrength: 15,
+  windAngle: 10,
+  dropSize: 5,
+  thunder: true,
+  thunderFrequency: 5,
+};
 
-class Droplet {
-  x: number; y: number; mass: number; radius: number; vy: number; vx: number;
-  opacity: number; stiction: number; isStuck: boolean; points: DropletPoint[];
-  targetVx: number; vxChangeCountdown: number; gravity: number; stictionFactor: number;
+// ============================================================================
+// MAIN COMPONENT
+// ============================================================================
 
-  constructor(x: number, y: number, mass: number, radius: number, settings: RainSettings) {
-    this.x = x; this.y = y; this.mass = mass; this.radius = radius;
-    this.vy = 0; this.vx = (Math.random() - 0.5) * 0.1; this.opacity = 0;
-    this.gravity = 0.001 * settings.speed;
-    this.stictionFactor = 0.1 * settings.stickiness;
-    this.stiction = 0.4 + Math.random() * this.stictionFactor * 2.5 + (1 / (this.radius + 1));
-    this.isStuck = true; this.points = this._createBlobShapePoints(radius);
-    this.targetVx = this.vx; this.vxChangeCountdown = 30 + Math.random() * 60;
-  }
+const Index = () => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [lightningFlash, setLightningFlash] = useState(0);
+  const [audioStarted, setAudioStarted] = useState(false);
 
-  _createBlobShapePoints(radius: number): DropletPoint[] {
-    const points: DropletPoint[] = [];
-    const pointCount = 12 + Math.floor(Math.random() * 6);
-    const angleStep = (Math.PI * 2) / pointCount;
-    const rx = radius * (0.7 + Math.random() * 0.6);
-    const ry = radius * (0.7 + Math.random() * 0.9);
-    for (let i = 0; i < pointCount; i++) {
-      const angle = i * angleStep;
-      const r = 1 + (Math.random() - 0.5) * 0.4;
-      let x = Math.cos(angle) * rx * r;
-      let y = Math.sin(angle) * ry * r;
-      if (Math.sin(angle) > 0) y += Math.sin(angle) * (radius * 0.3);
-      points.push({ x, y });
-    }
-    return points;
-  }
+  // Refs for animation state
+  const animationRef = useRef<number>(0);
+  const rainDropsRef = useRef<RainDrop[]>([]);
+  const waterDropsRef = useRef<WaterDrop[]>([]);
+  const splashesRef = useRef<Splash[]>([]);
+  const trailsRef = useRef<Trail[]>([]);
+  const timeRef = useRef(0);
+  const lastTimeRef = useRef(0);
+  const audioRef = useRef<any>(null);
+  const bgImageRef = useRef<HTMLCanvasElement | null>(null);
+  const bgLoadedRef = useRef<HTMLImageElement | null>(null);
 
-  update(dynamicSwayIntensity: number, droplets: Droplet[], createDropletCallback: (x: number, y: number, mass: number, radius: number) => void) {
-    if (this.opacity < 1) this.opacity += 0.05;
-    this.points.forEach(p => { p.x += (Math.random() - 0.5) * 0.2; p.y += (Math.random() - 0.5) * 0.2; });
-    const gravityForce = this.mass * this.gravity;
-    if (this.isStuck && gravityForce > this.stiction) this.isStuck = false;
-    if (this.isStuck) { this.y += gravityForce * (Math.random() * 0.35); }
-    else {
-      this.vy += gravityForce; this.y += this.vy;
-      this.vxChangeCountdown--;
-      if (this.vxChangeCountdown <= 0) {
-        this.targetVx = (Math.random() - 0.5) * (0.4 * dynamicSwayIntensity);
-        this.vxChangeCountdown = 60 + Math.random() * 120;
-      }
-      this.vx += (this.targetVx - this.vx) * 0.05; this.x += this.vx;
-      if (this.vy > 0.5 && this.mass > 10) {
-        const massToLose = this.vy * 0.02;
-        const massLost = Math.min(this.mass - 1, massToLose);
-        const trailRadius = Math.cbrt(massLost) * 3.5;
-        if (trailRadius > 3) {
-          this.mass -= massLost; this.radius = Math.cbrt(this.mass) * 3.5;
-          createDropletCallback(this.x + (Math.random() - 0.5) * this.radius * 0.3, this.y - this.radius, massLost, trailRadius);
+  // ============================================================================
+  // BACKGROUND - AI-generated photorealistic rainy city
+  // ============================================================================
+  const loadBackground = useCallback((width: number, height: number): Promise<HTMLCanvasElement> => {
+    return new Promise((resolve) => {
+      // If already loaded, just scale to canvas
+      if (bgLoadedRef.current) {
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d')!;
+
+        // Draw image to cover the entire canvas (cover mode)
+        const img = bgLoadedRef.current;
+        const imgRatio = img.width / img.height;
+        const canvasRatio = width / height;
+
+        let drawWidth, drawHeight, offsetX, offsetY;
+        if (canvasRatio > imgRatio) {
+          drawWidth = width;
+          drawHeight = width / imgRatio;
+          offsetX = 0;
+          offsetY = (height - drawHeight) / 2;
+        } else {
+          drawHeight = height;
+          drawWidth = height * imgRatio;
+          offsetX = (width - drawWidth) / 2;
+          offsetY = 0;
         }
+
+        ctx.drawImage(img, offsetX, offsetY, drawWidth, drawHeight);
+        resolve(canvas);
+        return;
       }
-    }
-    for (let j = droplets.length - 1; j >= 0; j--) {
-      const other = droplets[j];
-      if (!other || other === this) continue;
-      if (this.isCollidingWith(other)) { this.mergeWith(other); droplets.splice(j, 1); break; }
-    }
-  }
 
-  draw(rainCtx: CanvasRenderingContext2D, bgCanvas: HTMLCanvasElement, aberrationColorGrid: any[], aberrationGridSize: number) {
-    const _drawBlobShape = (points: DropletPoint[], x: number, y: number) => {
-      if (points.length < 2) return new Path2D();
-      const path = new Path2D(); path.moveTo(x + points[0].x, y + points[0].y);
-      for (let i = 1; i <= points.length; i++) {
-        const p1 = points[i - 1]; const p2 = points[i % points.length];
-        const xc = (p1.x + p2.x) / 2 + x; const yc = (p1.y + p2.y) / 2 + y;
-        path.quadraticCurveTo(x + p1.x, y + p1.y, xc, yc);
-      }
-      return path;
-    };
-    const path = _drawBlobShape(this.points, this.x, this.y);
+      const img = new Image();
+      img.onload = () => {
+        bgLoadedRef.current = img;
 
-    // 1. Distortion/Refraction Pass
-    rainCtx.save();
-    rainCtx.clip(path);
-    const distortion = this.radius * 0.25; // Reduced for a more subtle lens effect
-    if (bgCanvas.width > 0 && bgCanvas.height > 0) {
-        try {
-            rainCtx.drawImage(
-                bgCanvas,
-                this.x - this.radius - distortion, this.y - this.radius - distortion,
-                (this.radius + distortion) * 2, (this.radius + distortion) * 2,
-                this.x - this.radius, this.y - this.radius,
-                this.radius * 2, this.radius * 2
-            );
-        } catch (e) { /* ignore */ }
-    }
-    rainCtx.restore();
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d')!;
 
-    // 2. Shading, Highlights, and Effects Pass
-    rainCtx.save();
-    rainCtx.globalAlpha = this.opacity * 0.85; // Use the droplet's opacity
+        // Draw image to cover the entire canvas (cover mode)
+        const imgRatio = img.width / img.height;
+        const canvasRatio = width / height;
 
-    // A. Inner Shadow for volume (from the bottom)
-    const innerShadowGradient = rainCtx.createRadialGradient(
-        this.x, this.y + this.radius * 0.8, 0,
-        this.x, this.y, this.radius * 1.5
-    );
-    innerShadowGradient.addColorStop(0, 'rgba(0, 0, 0, 0.4)');
-    innerShadowGradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
-    rainCtx.fillStyle = innerShadowGradient;
-    rainCtx.fill(path);
+        let drawWidth, drawHeight, offsetX, offsetY;
+        if (canvasRatio > imgRatio) {
+          drawWidth = width;
+          drawHeight = width / imgRatio;
+          offsetX = 0;
+          offsetY = (height - drawHeight) / 2;
+        } else {
+          drawHeight = height;
+          drawWidth = height * imgRatio;
+          offsetX = (width - drawWidth) / 2;
+          offsetY = 0;
+        }
 
-    // B. Chromatic Aberration (subtler)
-    const gridX = Math.max(0, Math.min(aberrationGridSize - 1, Math.floor((this.x / rainCtx.canvas.width) * aberrationGridSize)));
-    const gridY = Math.max(0, Math.min(aberrationGridSize - 1, Math.floor((this.y / rainCtx.canvas.height) * aberrationGridSize)));
-    const colors = aberrationColorGrid[gridY * aberrationGridSize + gridX];
-    if (colors) {
-        rainCtx.globalCompositeOperation = 'lighter';
-        const fringeGradient = rainCtx.createRadialGradient(this.x, this.y, this.radius * 0.7, this.x, this.y, this.radius);
-        fringeGradient.addColorStop(0, 'rgba(255, 255, 255, 0)');
-        fringeGradient.addColorStop(0.85, `rgba(${colors.fringe1[0]}, ${colors.fringe1[1]}, ${colors.fringe1[2]}, 0.15)`);
-        fringeGradient.addColorStop(0.95, `rgba(${colors.fringe2[0]}, ${colors.fringe2[1]}, ${colors.fringe2[2]}, 0.2)`);
-        rainCtx.fillStyle = fringeGradient;
-        rainCtx.fill(path);
-        rainCtx.globalCompositeOperation = 'source-over'; // Reset
-    }
-
-    // C. Main Highlight (sharper, top-left)
-    const highlightX = this.x - this.radius * 0.4;
-    const highlightY = this.y - this.radius * 0.5;
-    const highlightGradient = rainCtx.createRadialGradient(
-        highlightX, highlightY, 0,
-        highlightX, highlightY, this.radius * 0.3
-    );
-    highlightGradient.addColorStop(0, 'rgba(255, 255, 255, 0.8)');
-    highlightGradient.addColorStop(0.3, 'rgba(255, 255, 255, 0.4)');
-    highlightGradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
-    rainCtx.fillStyle = highlightGradient;
-    rainCtx.fill(path);
-
-    // D. Rim Light (subtle edge highlight on top)
-    rainCtx.save();
-    rainCtx.clip(path);
-    rainCtx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-    rainCtx.lineWidth = 2;
-    rainCtx.filter = 'blur(1px)';
-    rainCtx.beginPath();
-    rainCtx.arc(this.x, this.y, this.radius, Math.PI * 1.2, Math.PI * 1.8);
-    rainCtx.stroke();
-    rainCtx.restore();
-
-    // 3. Final Border for definition
-    rainCtx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
-    rainCtx.lineWidth = 0.5;
-    rainCtx.stroke(path);
-
-    rainCtx.restore();
-  }
-
-  isCollidingWith(other: Droplet): boolean { const dx = this.x - other.x; const dy = this.y - other.y; return Math.sqrt(dx * dx + dy * dy) < (this.radius + other.radius) * 0.75; }
-  mergeWith(other: Droplet) {
-    const totalMass = this.mass + other.mass;
-    this.x = (this.x * this.mass + other.x * other.mass) / totalMass;
-    this.y = (this.y * this.mass + other.y * other.mass) / totalMass;
-    this.mass = totalMass; this.radius = Math.cbrt(this.mass) * 3.5;
-    if (!other.isStuck) this.isStuck = false;
-    this.points = this._createBlobShapePoints(this.radius);
-  }
-}
-
-const RainSimulatorPage = () => {
-  const [settings, setSettings] = useState<RainSettings>({ amount: 700, size: 4, speed: 5, stickiness: 4, sound: 0, backgroundUrl: null, thunder: false, thunderFrequency: 5 });
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [isAudioContextStarted, setIsAudioContextStarted] = useState(false);
-  const [lightningOpacity, setLightningOpacity] = useState(0);
-  const bgCanvasRef = useRef<HTMLCanvasElement>(null);
-  const rainCanvasRef = useRef<HTMLCanvasElement>(null);
-  const dropletsRef = useRef<Droplet[]>([]);
-  const userImageRef = useRef<HTMLImageElement | null>(null);
-  const audioNodesRef = useRef<any>({});
-  const animationFrameIdRef = useRef<number>();
-  const isAudioSetup = useRef(false);
-
-  const handleInteraction = async () => {
-    if (!isAudioContextStarted) {
-      await Tone.start();
-      setIsAudioContextStarted(true);
-    }
-  };
-
-  const handleSettingsChange = (newSettings: Partial<RainSettings>) => {
-    setSettings(prev => ({ ...prev, ...newSettings }));
-  };
-
-  const createDroplet = useCallback((x?: number, y?: number, mass?: number, radius?: number) => {
-    const rainCanvas = rainCanvasRef.current; if (!rainCanvas) return;
-    const finalX = x ?? Math.random() * rainCanvas.width;
-    const finalY = y ?? Math.random() * rainCanvas.height;
-    const baseMass = 10 + Math.pow(settings.size, 3.2);
-    const finalMass = mass ?? Math.pow(Math.random(), 2) * baseMass + 10;
-    const finalRadius = radius ?? Math.cbrt(finalMass) * 3.5;
-    const newDroplet = new Droplet(finalX, finalY, finalMass, finalRadius, settings);
-    if (y !== undefined) { newDroplet.isStuck = true; newDroplet.vy = 0; }
-    dropletsRef.current.push(newDroplet);
-  }, [settings]);
-
-  const populateDroplets = useCallback(() => {
-    for (let i = 0; i < settings.amount / 4; i++) createDroplet();
-  }, [settings.amount, createDroplet]);
-
-  const handleRefresh = useCallback(() => {
-    setRefreshKey(k => k + 1);
-  }, []);
-
-  const setupAudio = useCallback(() => {
-    const limiter = new Tone.Limiter(-6).toDestination();
-    const reverb = new Tone.Reverb({ decay: 4, wet: 0.5, preDelay: 0.1 }).connect(limiter);
-
-    const rainNoise = new Tone.Noise("brown").start();
-    const rainFilter = new Tone.AutoFilter({ frequency: '8n', baseFrequency: 600, octaves: 4, depth: 0.8 }).connect(reverb);
-    const rainEQ = new Tone.EQ3({ low: -5, mid: -15, high: -25 }).connect(rainFilter);
-    rainNoise.connect(rainEQ);
-
-    const sizzleNoise = new Tone.Noise("white").start();
-    const sizzleFilter = new Tone.Filter(7000, "highpass").connect(reverb);
-    sizzleNoise.connect(sizzleFilter);
-    
-    const patSynth = new Tone.PolySynth(Tone.Synth).connect(reverb);
-    patSynth.set({
-        oscillator: { type: 'sine' },
-        envelope: { attack: 0.001, decay: 0.05, sustain: 0, release: 0.1 },
+        ctx.drawImage(img, offsetX, offsetY, drawWidth, drawHeight);
+        resolve(canvas);
+      };
+      img.onerror = () => {
+        // Fallback to dark gradient if image fails to load
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d')!;
+        const grad = ctx.createLinearGradient(0, 0, 0, height);
+        grad.addColorStop(0, '#0a0a12');
+        grad.addColorStop(0.5, '#1a1c2a');
+        grad.addColorStop(1, '#252838');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, width, height);
+        resolve(canvas);
+      };
+      img.src = `${import.meta.env.BASE_URL}rainy-city-bg.png`;
     });
-    patSynth.volume.value = -12;
-
-    const thunderSynth = new Tone.NoiseSynth({
-        noise: { type: 'brown' },
-        envelope: { attack: 0.01, decay: 0.5, sustain: 0.2, release: 1.5 }
-    }).connect(reverb);
-    thunderSynth.volume.value = -5;
-
-    audioNodesRef.current = { rainNoise, sizzleNoise, patSynth, thunderSynth };
-    isAudioSetup.current = true;
   }, []);
 
-  const triggerLightning = useCallback(() => {
-    setLightningOpacity(0.8);
-    setTimeout(() => setLightningOpacity(0), 50);
-    setTimeout(() => setLightningOpacity(0.5), 150);
-    setTimeout(() => setLightningOpacity(0), 200);
+  // ============================================================================
+  // RAIN DROP CREATION
+  // ============================================================================
+  const createRainDrop = useCallback((width: number, height: number, settings: Settings): RainDrop => {
+    const z = Math.random(); // 0 = far, 1 = close
+    const windOffset = (settings.windStrength / 100) * width * 0.3;
 
-    const delay = 500 + Math.random() * 1500;
-    setTimeout(() => {
-        if (isAudioSetup.current && audioNodesRef.current.thunderSynth) {
-            audioNodesRef.current.thunderSynth.triggerAttackRelease("2n");
-        }
-    }, delay);
+    return {
+      x: Math.random() * (width + windOffset) - windOffset * 0.5,
+      y: -20 - Math.random() * 100,
+      z,
+      length: 15 + z * 25 + settings.dropSize * 3,
+      speed: 12 + z * 18 + (settings.intensity / 100) * 10,
+      opacity: 0.15 + z * 0.35,
+      thickness: 0.5 + z * 1.5,
+    };
   }, []);
 
+  // ============================================================================
+  // WATER DROP ON GLASS
+  // ============================================================================
+  const createWaterDrop = useCallback((x: number, y: number, settings: Settings): WaterDrop => {
+    const mass = 3 + Math.random() * settings.dropSize * 2;
+    return {
+      x,
+      y,
+      radius: Math.pow(mass, 0.5) * 3,
+      vx: 0,
+      vy: 0,
+      stuck: Math.random() > 0.3,
+      stuckTime: 0,
+      mass,
+      wobble: 0,
+      wobbleSpeed: 2 + Math.random() * 4,
+    };
+  }, []);
+
+  // ============================================================================
+  // MAIN ANIMATION LOOP
+  // ============================================================================
   useEffect(() => {
-    if (!settings.thunder || !isAudioContextStarted) return;
-    let timeoutId: number;
-    const scheduleThunder = () => {
-        const frequencyFactor = 11 - settings.thunderFrequency; // maps 1-10 to 10-1
-        const baseDelay = 4000 * frequencyFactor; // 40s for freq 1, 4s for freq 10
-        const randomDelay = baseDelay * Math.random();
-        const totalDelay = baseDelay + randomDelay;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-        timeoutId = window.setTimeout(() => {
-            triggerLightning();
-            scheduleThunder();
-        }, totalDelay);
-    };
-    scheduleThunder();
-    return () => clearTimeout(timeoutId);
-  }, [settings.thunder, settings.thunderFrequency, isAudioContextStarted, triggerLightning]);
+    const ctx = canvas.getContext('2d', { alpha: false })!;
+    let width = window.innerWidth;
+    let height = window.innerHeight;
 
-  useEffect(() => {
-    const bgCanvas = bgCanvasRef.current!; const rainCanvas = rainCanvasRef.current!;
-    const bgCtx = bgCanvas.getContext('2d')!; const rainCtx = rainCanvas.getContext('2d')!;
-    const aberrationColorGrid: any[] = []; const aberrationGridSize = 5;
-    let frameCount = 0; let lastSoundTime = 0; const minSoundInterval = 50;
-    let currentSoundProbability = 0.2;
-
-    const playPatSound = (droplet: Droplet) => {
-      if (!isAudioSetup.current || !droplet || !audioNodesRef.current.patSynth) return;
-      const { patSynth } = audioNodesRef.current;
-      const velocity = Math.min(1, 0.2 + (droplet.mass / 100));
-      const notes = ['C6', 'E6', 'G6', 'A6', 'C7'];
-      const note = notes[Math.floor(Math.random() * notes.length)];
-      const duration = ['32n', '64n'][Math.floor(Math.random() * 2)];
-      patSynth.triggerAttackRelease(note, duration, Tone.now(), velocity);
+    const resize = async () => {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = width;
+      canvas.height = height;
+      bgImageRef.current = await loadBackground(width, height);
     };
 
-    const rgbToHsl = (r:number, g:number, b:number) => { r /= 255; g /= 255; b /= 255; const max = Math.max(r, g, b), min = Math.min(r, g, b); let h = 0, s = 0, l = (max + min) / 2; if (max !== min) { const d = max - min; s = l > 0.5 ? d / (2 - max - min) : d / (max + min); switch (max) { case r: h = (g - b) / d + (g < b ? 6 : 0); break; case g: h = (b - r) / d + 2; break; case b: h = (r - g) / d + 4; break; } h /= 6; } return [h, s, l]; };
-    const hslToRgb = (h:number, s:number, l:number) => { let r, g, b; if (s === 0) { r = g = b = l; } else { const hue2rgb = (p:number, q:number, t:number) => { if (t < 0) t += 1; if (t > 1) t -= 1; if (t < 1/6) return p + (q - p) * 6 * t; if (t < 1/2) return q; if (t < 2/3) return p + (q - p) * (2/3 - t) * 6; return p; }; const q = l < 0.5 ? l * (1 + s) : l + s - l * s; const p = 2 * l - q; r = hue2rgb(p, q, h + 1/3); g = hue2rgb(p, q, h); b = hue2rgb(p, q, h - 1/3); } return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)]; };
-    const drawCoverImage = (ctx: CanvasRenderingContext2D, img: HTMLImageElement) => { const cA = ctx.canvas.width / ctx.canvas.height; const iA = img.naturalWidth / img.naturalHeight; let sx, sy, sW, sH; if (iA > cA) { sH = img.naturalHeight; sW = sH * cA; sx = (img.naturalWidth - sW) / 2; sy = 0; } else { sW = img.naturalWidth; sH = sW / cA; sx = 0; sy = (img.naturalHeight - sH) / 2; } ctx.drawImage(img, sx, sy, sW, sH, 0, 0, ctx.canvas.width, ctx.canvas.height); };
-    
-    const updateAberrationGrid = () => { if (bgCanvas.width === 0) return; aberrationColorGrid.length = 0; for (let y = 0; y < aberrationGridSize; y++) for (let x = 0; x < aberrationGridSize; x++) { const sX = Math.floor((x / (aberrationGridSize - 1)) * (bgCanvas.width - 1)); const sY = Math.floor((y / (aberrationGridSize - 1)) * (bgCanvas.height - 1)); try { const p = bgCtx.getImageData(sX, sY, 1, 1).data; const [h, s, l] = rgbToHsl(p[0], p[1], p[2]); aberrationColorGrid.push({ fringe1: hslToRgb((h + 0.1) % 1, s, l), fringe2: hslToRgb((h - 0.1 + 1) % 1, s, l) }); } catch (e) { aberrationColorGrid.push(null); } } };
-    
-    const drawBokehCityBackground = () => {
-        if (bgCanvas.width === 0 || bgCanvas.height === 0) return;
-        
-        const palettes = [
-            { sky: '#2c3e50', road: '#222225', building: '#1a1a1d', lights: ['#ffdd44', '#ffbb33', '#ff8811', '#ff5500', '#ff2200', '#ffffff'] },
-            { sky: '#1c2541', road: '#0b132b', building: '#000000', lights: ['#aaddff', '#88ccff', '#66bbff', '#ffffff', '#ffdd44'] },
-            { sky: '#4b2c30', road: '#3d2225', building: '#301a1d', lights: ['#ff8c69', '#ff6347', '#ff4500', '#ffffff'] },
-            { sky: '#000000', road: '#111111', building: '#080808', lights: ['#ff00ff', '#00ffff', '#ffff00', '#ffffff'] }
-        ];
-        const { sky: skyColor, road: roadColor, building: buildingColor, lights: lightColors } = palettes[Math.floor(Math.random() * palettes.length)];
+    resize();
+    window.addEventListener('resize', resize);
 
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = bgCanvas.width;
-        tempCanvas.height = bgCanvas.height;
-        const tempCtx = tempCanvas.getContext('2d')!;
-
-        tempCtx.fillStyle = skyColor;
-        tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
-
-        const horizonY = tempCanvas.height * (0.5 + Math.random() * 0.2);
-        const roadCenterX = tempCanvas.width * (0.4 + Math.random() * 0.2);
-        const roadVanishingWidth = tempCanvas.width * (0.02 + Math.random() * 0.08);
-        const roadBottomWidth = tempCanvas.width * (0.6 + Math.random() * 0.4);
-
-        tempCtx.fillStyle = roadColor;
-        tempCtx.beginPath();
-        tempCtx.moveTo(roadCenterX - roadBottomWidth / 2, tempCanvas.height);
-        tempCtx.lineTo(roadCenterX - roadVanishingWidth / 2, horizonY);
-        tempCtx.lineTo(roadCenterX + roadVanishingWidth / 2, horizonY);
-        tempCtx.lineTo(roadCenterX + roadBottomWidth / 2, tempCanvas.height);
-        tempCtx.closePath();
-        tempCtx.fill();
-
-        tempCtx.fillStyle = buildingColor;
-        const buildingPasses = 3;
-        for (let p = 0; p < buildingPasses; p++) {
-            const buildingCount = 5 + Math.floor(Math.random() * 10);
-            const maxBuildingHeight = (tempCanvas.height - horizonY) * (1 - p * 0.2);
-            for (let i = 0; i < buildingCount; i++) {
-                const x = Math.random() * tempCanvas.width;
-                const width = 50 + Math.random() * 150;
-                const height = (0.2 + Math.random() * 0.8) * maxBuildingHeight;
-                const y = horizonY - height * (0.1 + Math.random() * 0.2);
-                tempCtx.globalAlpha = 0.6 + Math.random() * 0.4;
-                tempCtx.fillRect(x, y, width, tempCanvas.height - y);
-            }
-        }
-        tempCtx.globalAlpha = 1.0;
-
-        bgCtx.save();
-        bgCtx.filter = 'blur(8px)';
-        bgCtx.drawImage(tempCanvas, 0, 0);
-        bgCtx.restore();
-
-        const numLights = 200 + Math.floor(Math.random() * 150);
-        for (let i = 0; i < numLights; i++) {
-            const y = horizonY * 0.9 + Math.random() * (bgCanvas.height - horizonY * 0.9);
-            const perspective = (y - horizonY) / (bgCanvas.height - horizonY);
-            const x = Math.random() * bgCanvas.width;
-            const radius = (perspective * perspective * 25) + 2;
-            const color = lightColors[Math.floor(Math.random() * lightColors.length)];
-            const opacity = 0.2 + perspective * 0.6 + Math.random() * 0.2;
-
-            bgCtx.beginPath();
-            const gradient = bgCtx.createRadialGradient(x, y, 0, x, y, radius);
-            const rgbColor = color.replace('#', '');
-            const r = parseInt(rgbColor.substring(0, 2), 16);
-            const g = parseInt(rgbColor.substring(2, 4), 16);
-            const b = parseInt(rgbColor.substring(4, 6), 16);
-
-            gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${opacity})`);
-            gradient.addColorStop(0.4, `rgba(${r}, ${g}, ${b}, ${opacity * 0.5})`);
-            gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
-            
-            bgCtx.fillStyle = gradient;
-            bgCtx.arc(x, y, radius, 0, Math.PI * 2);
-            bgCtx.fill();
-        }
-    };
-
-    const animate = () => {
-      rainCtx.clearRect(0, 0, rainCanvas.width, rainCanvas.height);
-      frameCount++; if (frameCount % 5 === 0) updateAberrationGrid();
-      const normDrops = Math.max(0, Math.min(1, (settings.amount - 100) / (2500 - 100)));
-      const dynamicSwayIntensity = 2.5 - (normDrops * (2.5 - 1));
-      currentSoundProbability += ((0.1 + (normDrops * (0.4 - 0.1))) - currentSoundProbability) * 0.02;
-      for (let i = 0; i < 5; i++) if (Math.random() < settings.amount / 1500) createDroplet();
-      const now = performance.now();
-      if (isAudioSetup.current && now - lastSoundTime > minSoundInterval && Math.random() < currentSoundProbability && dropletsRef.current.length > 0) { playPatSound(dropletsRef.current[Math.floor(Math.random() * dropletsRef.current.length)]); lastSoundTime = now; }
-      for (let i = dropletsRef.current.length - 1; i >= 0; i--) { const d = dropletsRef.current[i]; d.update(dynamicSwayIntensity, dropletsRef.current, createDroplet); if (d.y - d.radius > rainCanvas.height) dropletsRef.current.splice(i, 1); else d.draw(rainCtx, bgCanvas, aberrationColorGrid, aberrationGridSize); }
-      animationFrameIdRef.current = requestAnimationFrame(animate);
-    };
-
-    const resizeAll = () => {
-      rainCanvas.width = bgCanvas.width = window.innerWidth;
-      rainCanvas.height = bgCanvas.height = window.innerHeight;
-      if (userImageRef.current && userImageRef.current.complete) {
-        bgCtx.filter = 'blur(3px)';
-        drawCoverImage(bgCtx, userImageRef.current);
-        bgCtx.filter = 'none';
-      } else {
-        drawBokehCityBackground();
+    // Initialize rain drops
+    const initRain = () => {
+      rainDropsRef.current = [];
+      for (let i = 0; i < 200; i++) {
+        rainDropsRef.current.push(createRainDrop(width, height, settings));
       }
-      updateAberrationGrid();
+    };
+    initRain();
+
+    // Pre-populate water drops on glass
+    for (let i = 0; i < 40; i++) {
+      const drop = createWaterDrop(
+        Math.random() * width,
+        Math.random() * height,
+        settings
+      );
+      drop.stuck = true;
+      waterDropsRef.current.push(drop);
+    }
+
+    // Animation loop
+    const animate = (timestamp: number) => {
+      const deltaTime = lastTimeRef.current ? (timestamp - lastTimeRef.current) / 16.67 : 1;
+      lastTimeRef.current = timestamp;
+      timeRef.current = timestamp;
+
+      // Clear and draw background
+      if (bgImageRef.current) {
+        ctx.drawImage(bgImageRef.current, 0, 0);
+      }
+
+      // Lightning flash overlay
+      if (lightningFlash > 0) {
+        ctx.fillStyle = `rgba(200, 210, 255, ${lightningFlash * 0.4})`;
+        ctx.fillRect(0, 0, width, height);
+      }
+
+      const windX = Math.sin(settings.windAngle * Math.PI / 180) * (settings.windStrength / 100) * 8;
+      const windY = Math.cos(settings.windAngle * Math.PI / 180) * 0.5;
+
+      // ========================================
+      // FALLING RAIN DROPS
+      // ========================================
+      const targetRainCount = Math.floor(50 + (settings.intensity / 100) * 250);
+
+      // Add new drops as needed
+      while (rainDropsRef.current.length < targetRainCount) {
+        rainDropsRef.current.push(createRainDrop(width, height, settings));
+      }
+
+      // Update and render rain
+      for (let i = rainDropsRef.current.length - 1; i >= 0; i--) {
+        const drop = rainDropsRef.current[i];
+
+        // Motion with wind
+        drop.x += windX * drop.z * deltaTime;
+        drop.y += drop.speed * deltaTime;
+
+        // Draw rain streak
+        const endX = drop.x - windX * drop.length * 0.05;
+        const endY = drop.y - drop.length;
+
+        const gradient = ctx.createLinearGradient(endX, endY, drop.x, drop.y);
+        gradient.addColorStop(0, `rgba(180, 200, 220, 0)`);
+        gradient.addColorStop(0.3, `rgba(180, 200, 220, ${drop.opacity * 0.3})`);
+        gradient.addColorStop(1, `rgba(220, 235, 255, ${drop.opacity})`);
+
+        ctx.beginPath();
+        ctx.strokeStyle = gradient;
+        ctx.lineWidth = drop.thickness;
+        ctx.lineCap = 'round';
+        ctx.moveTo(endX, endY);
+        ctx.lineTo(drop.x, drop.y);
+        ctx.stroke();
+
+        // Reset if off screen
+        if (drop.y > height + 50) {
+          // Maybe create splash
+          if (Math.random() < 0.15) {
+            splashesRef.current.push({
+              x: drop.x,
+              y: height - 10 - Math.random() * 20,
+              radius: 2,
+              maxRadius: 8 + Math.random() * 12,
+              opacity: 0.4,
+              rings: 2 + Math.floor(Math.random() * 2),
+            });
+          }
+
+          // Maybe create water drop on glass
+          if (Math.random() < 0.1) {
+            waterDropsRef.current.push(createWaterDrop(drop.x, Math.random() * height * 0.3, settings));
+          }
+
+          // Reset drop
+          Object.assign(drop, createRainDrop(width, height, settings));
+        }
+      }
+
+      // ========================================
+      // WATER DROPS ON GLASS
+      // ========================================
+      for (let i = waterDropsRef.current.length - 1; i >= 0; i--) {
+        const drop = waterDropsRef.current[i];
+
+        // Wobble animation for realism
+        drop.wobble += drop.wobbleSpeed * 0.01 * deltaTime;
+        const wobbleX = Math.sin(drop.wobble) * drop.radius * 0.05;
+        const wobbleY = Math.cos(drop.wobble * 1.3) * drop.radius * 0.03;
+
+        if (drop.stuck) {
+          drop.stuckTime += deltaTime;
+          // Gravity slowly overcomes surface tension
+          if (drop.stuckTime > 60 + Math.random() * 200 || drop.mass > 10) {
+            drop.stuck = false;
+          }
+          // Small drift
+          drop.y += 0.02 * deltaTime;
+        } else {
+          // Falling
+          const gravity = 0.04 * drop.mass * deltaTime;
+          drop.vy = Math.min(drop.vy + gravity, 4);
+          drop.vx += windX * 0.01 * deltaTime;
+          drop.vx *= 0.98; // friction
+
+          drop.x += drop.vx * deltaTime;
+          drop.y += drop.vy * deltaTime;
+
+          // Leave trail
+          if (Math.random() < 0.15 && drop.vy > 0.5) {
+            trailsRef.current.push({
+              x: drop.x + (Math.random() - 0.5) * drop.radius * 0.5,
+              y: drop.y - drop.radius,
+              radius: 1 + Math.random() * 2,
+              opacity: 0.4,
+              age: 0,
+            });
+            drop.mass *= 0.995; // lose a bit of mass
+            drop.radius = Math.pow(drop.mass, 0.5) * 3;
+          }
+        }
+
+        // Check for collision with other drops
+        for (let j = i - 1; j >= 0; j--) {
+          const other = waterDropsRef.current[j];
+          const dx = drop.x - other.x;
+          const dy = drop.y - other.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+
+          if (dist < (drop.radius + other.radius) * 0.8) {
+            // Merge
+            const totalMass = drop.mass + other.mass;
+            drop.x = (drop.x * drop.mass + other.x * other.mass) / totalMass;
+            drop.y = (drop.y * drop.mass + other.y * other.mass) / totalMass;
+            drop.vx = (drop.vx * drop.mass + other.vx * other.mass) / totalMass;
+            drop.vy = (drop.vy * drop.mass + other.vy * other.mass) / totalMass;
+            drop.mass = totalMass;
+            drop.radius = Math.pow(totalMass, 0.5) * 3;
+            drop.stuck = false;
+            waterDropsRef.current.splice(j, 1);
+            i--;
+            break;
+          }
+        }
+
+        // Absorb trails
+        for (let t = trailsRef.current.length - 1; t >= 0; t--) {
+          const trail = trailsRef.current[t];
+          const dx = drop.x - trail.x;
+          const dy = drop.y - trail.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+
+          if (dist < drop.radius + trail.radius) {
+            drop.mass += trail.radius * 0.3;
+            drop.radius = Math.pow(drop.mass, 0.5) * 3;
+            trailsRef.current.splice(t, 1);
+          }
+        }
+
+        // Remove if off screen
+        if (drop.y > height + 50) {
+          waterDropsRef.current.splice(i, 1);
+          continue;
+        }
+
+        // ========================================
+        // RENDER WATER DROP - Glass refraction effect
+        // ========================================
+        const dx = drop.x + wobbleX;
+        const dy = drop.y + wobbleY;
+        const r = drop.radius;
+
+        // Sample background for refraction
+        if (bgImageRef.current) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.ellipse(dx, dy, r * 1.1, r * 0.95, 0, 0, Math.PI * 2);
+          ctx.clip();
+
+          // Draw magnified background (lens effect)
+          const scale = 1.15;
+          const srcSize = r * 2 * scale;
+          ctx.drawImage(
+            bgImageRef.current,
+            Math.max(0, dx - srcSize / 2),
+            Math.max(0, dy - srcSize / 2),
+            srcSize,
+            srcSize,
+            dx - r,
+            dy - r,
+            r * 2,
+            r * 2
+          );
+          ctx.restore();
+        }
+
+        // Inner depth shadow
+        const shadowGrad = ctx.createRadialGradient(dx, dy + r * 0.3, 0, dx, dy, r);
+        shadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0.25)');
+        shadowGrad.addColorStop(0.6, 'rgba(0, 0, 0, 0.1)');
+        shadowGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.beginPath();
+        ctx.fillStyle = shadowGrad;
+        ctx.ellipse(dx, dy, r, r * 0.9, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Specular highlight
+        const hlX = dx - r * 0.35;
+        const hlY = dy - r * 0.35;
+        const hlR = r * 0.35;
+        const hlGrad = ctx.createRadialGradient(hlX, hlY, 0, hlX, hlY, hlR);
+        hlGrad.addColorStop(0, 'rgba(255, 255, 255, 0.8)');
+        hlGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.3)');
+        hlGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        ctx.beginPath();
+        ctx.fillStyle = hlGrad;
+        ctx.arc(hlX, hlY, hlR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Rim light
+        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+        ctx.lineWidth = 1;
+        ctx.ellipse(dx, dy, r, r * 0.9, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // ========================================
+      // TRAIL BEADS
+      // ========================================
+      for (let i = trailsRef.current.length - 1; i >= 0; i--) {
+        const trail = trailsRef.current[i];
+        trail.age += deltaTime;
+        trail.opacity = Math.max(0, 0.4 - trail.age * 0.003);
+        trail.radius *= 0.999;
+
+        if (trail.opacity <= 0 || trail.radius < 0.5) {
+          trailsRef.current.splice(i, 1);
+          continue;
+        }
+
+        // Render small bead
+        const grad = ctx.createRadialGradient(trail.x, trail.y, 0, trail.x, trail.y, trail.radius);
+        grad.addColorStop(0, `rgba(200, 220, 240, ${trail.opacity})`);
+        grad.addColorStop(0.5, `rgba(180, 200, 220, ${trail.opacity * 0.5})`);
+        grad.addColorStop(1, `rgba(150, 170, 190, 0)`);
+        ctx.beginPath();
+        ctx.fillStyle = grad;
+        ctx.arc(trail.x, trail.y, trail.radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // ========================================
+      // SPLASHES
+      // ========================================
+      for (let i = splashesRef.current.length - 1; i >= 0; i--) {
+        const splash = splashesRef.current[i];
+        splash.radius += 0.8 * deltaTime;
+        splash.opacity -= 0.02 * deltaTime;
+
+        if (splash.opacity <= 0 || splash.radius > splash.maxRadius) {
+          splashesRef.current.splice(i, 1);
+          continue;
+        }
+
+        for (let ring = 0; ring < splash.rings; ring++) {
+          const ringRadius = splash.radius - ring * 3;
+          if (ringRadius > 0) {
+            ctx.beginPath();
+            ctx.strokeStyle = `rgba(200, 220, 255, ${splash.opacity * (1 - ring * 0.3)})`;
+            ctx.lineWidth = 1;
+            ctx.arc(splash.x, splash.y, ringRadius, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        }
+      }
+
+      // ========================================
+      // GLASS OVERLAY EFFECTS
+      // ========================================
+      // Subtle vignette
+      const vignette = ctx.createRadialGradient(
+        width / 2, height / 2, height * 0.3,
+        width / 2, height / 2, height * 0.9
+      );
+      vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      vignette.addColorStop(1, 'rgba(0, 0, 0, 0.3)');
+      ctx.fillStyle = vignette;
+      ctx.fillRect(0, 0, width, height);
+
+      // Continue animation
+      animationRef.current = requestAnimationFrame(animate);
     };
 
-    if (settings.backgroundUrl) { const img = new Image(); img.crossOrigin = "anonymous"; img.src = settings.backgroundUrl; img.onload = () => { userImageRef.current = img; resizeAll(); }; }
-    else { userImageRef.current = null; }
-
-    resizeAll();
-    populateDroplets();
-    animate();
-    window.addEventListener('resize', resizeAll);
+    animationRef.current = requestAnimationFrame(animate);
 
     return () => {
-      window.removeEventListener('resize', resizeAll);
-      if (animationFrameIdRef.current) cancelAnimationFrame(animationFrameIdRef.current);
-      dropletsRef.current = [];
+      cancelAnimationFrame(animationRef.current);
+      window.removeEventListener('resize', resize);
     };
-  }, [createDroplet, populateDroplets, settings.backgroundUrl, settings.amount, settings.size, refreshKey]);
+  }, [settings, lightningFlash, createRainDrop, createWaterDrop, loadBackground]);
 
+  // ============================================================================
+  // THUNDER & LIGHTNING
+  // ============================================================================
   useEffect(() => {
-    if (isAudioContextStarted && settings.sound > 0 && !isAudioSetup.current) {
-      setupAudio();
-    }
-    if (isAudioSetup.current) {
-      const { rainNoise, sizzleNoise, patSynth, thunderSynth } = audioNodesRef.current;
-      if (rainNoise && sizzleNoise && patSynth && thunderSynth) {
-        const masterVolume = settings.sound / 100;
-        const targetRainVolume = settings.sound === 0 ? -Infinity : (masterVolume * 25) - 30;
-        rainNoise.volume.rampTo(targetRainVolume, 0.5);
-        
-        const targetSizzleVolume = settings.sound === 0 ? -Infinity : (masterVolume * 30) - 45;
-        sizzleNoise.volume.rampTo(targetSizzleVolume, 0.5);
+    if (!settings.thunder) return;
 
-        const targetPatVolume = settings.sound === 0 ? -Infinity : (masterVolume * 15) - 20;
-        patSynth.volume.rampTo(targetPatVolume, 0.5);
+    const triggerLightning = () => {
+      // Flash sequence
+      setLightningFlash(1);
+      setTimeout(() => setLightningFlash(0), 80);
+      setTimeout(() => setLightningFlash(0.7), 150);
+      setTimeout(() => setLightningFlash(0), 220);
+      setTimeout(() => setLightningFlash(0.4), 300);
+      setTimeout(() => setLightningFlash(0), 380);
 
-        const targetThunderVolume = settings.sound === 0 ? -Infinity : -5;
-        thunderSynth.volume.rampTo(targetThunderVolume, 0.5);
+      // Thunder sound
+      if (audioRef.current) {
+        const delay = 500 + Math.random() * 2500;
+        setTimeout(() => {
+          audioRef.current?.thunderSynth?.triggerAttackRelease('2n');
+        }, delay);
       }
-    }
-  }, [settings.sound, setupAudio, isAudioContextStarted]);
+    };
 
+    const interval = setInterval(() => {
+      if (Math.random() < settings.thunderFrequency / 10) {
+        triggerLightning();
+      }
+    }, 4000);
+
+    return () => clearInterval(interval);
+  }, [settings.thunder, settings.thunderFrequency]);
+
+  // ============================================================================
+  // AUDIO SETUP
+  // ============================================================================
+  const startAudio = async () => {
+    if (audioStarted) return;
+    await Tone.start();
+    setAudioStarted(true);
+
+    const reverb = new Tone.Reverb({ decay: 3, wet: 0.4 }).toDestination();
+
+    const rainNoise = new Tone.Noise('brown').start();
+    const filter = new Tone.Filter(800, 'lowpass').connect(reverb);
+    rainNoise.connect(filter);
+    rainNoise.volume.value = -25;
+
+    const thunderSynth = new Tone.NoiseSynth({
+      noise: { type: 'brown' },
+      envelope: { attack: 0.05, decay: 0.8, sustain: 0.2, release: 2 }
+    }).connect(reverb);
+    thunderSynth.volume.value = -10;
+
+    audioRef.current = { rainNoise, thunderSynth };
+  };
+
+  // ============================================================================
+  // REFRESH
+  // ============================================================================
+  const handleRefresh = async () => {
+    rainDropsRef.current = [];
+    waterDropsRef.current = [];
+    splashesRef.current = [];
+    trailsRef.current = [];
+
+    // Reload background
+    if (canvasRef.current) {
+      bgImageRef.current = await loadBackground(
+        canvasRef.current.width,
+        canvasRef.current.height
+      );
+    }
+  };
+
+  // ============================================================================
+  // RENDER
+  // ============================================================================
   return (
-    <div onClick={handleInteraction} className="w-screen h-screen bg-black overflow-hidden cursor-default">
-      <canvas ref={bgCanvasRef} className="absolute top-0 left-0 w-full h-full z-10" />
-      <canvas ref={rainCanvasRef} className="absolute top-0 left-0 w-full h-full z-20" />
-      <div 
-        className="absolute top-0 left-0 w-full h-full bg-white z-30 pointer-events-none"
-        style={{ opacity: lightningOpacity, transition: 'opacity 50ms ease-in-out' }}
+    <div className="w-screen h-screen overflow-hidden bg-black" onClick={startAudio}>
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 w-full h-full"
+        style={{ imageRendering: 'auto' }}
       />
-      <SettingsPanel settings={settings} onSettingsChange={handleSettingsChange} onRefresh={handleRefresh} />
+
+      {/* Settings Panel */}
+      <Sheet>
+        <SheetTrigger asChild>
+          <Button
+            variant="outline"
+            size="icon"
+            className="fixed bottom-5 left-5 z-50 rounded-full h-14 w-14 bg-black/40 backdrop-blur-xl border-white/20 hover:bg-black/60 shadow-2xl"
+          >
+            <Settings className="h-6 w-6 text-white" />
+          </Button>
+        </SheetTrigger>
+        <SheetContent
+          side="left"
+          className="w-[350px] bg-black/80 backdrop-blur-2xl border-white/10 overflow-y-auto"
+        >
+          <SheetHeader>
+            <SheetTitle className="text-white flex items-center gap-2">
+              <CloudRain className="h-5 w-5" />
+              Rain Controls
+            </SheetTitle>
+            <SheetDescription className="text-white/50">
+              Create your perfect storm
+            </SheetDescription>
+          </SheetHeader>
+
+          <div className="grid gap-6 py-6">
+            {/* Intensity */}
+            <div className="grid gap-3">
+              <div className="flex justify-between">
+                <Label className="text-white/80">Intensity</Label>
+                <span className="text-white/50 text-sm">{settings.intensity}%</span>
+              </div>
+              <Slider
+                min={10}
+                max={100}
+                value={[settings.intensity]}
+                onValueChange={([v]) => setSettings(s => ({ ...s, intensity: v }))}
+              />
+            </div>
+
+            {/* Wind Strength */}
+            <div className="grid gap-3">
+              <div className="flex justify-between">
+                <Label className="text-white/80">Wind Strength</Label>
+                <span className="text-white/50 text-sm">{settings.windStrength}%</span>
+              </div>
+              <Slider
+                min={0}
+                max={100}
+                value={[settings.windStrength]}
+                onValueChange={([v]) => setSettings(s => ({ ...s, windStrength: v }))}
+              />
+            </div>
+
+            {/* Wind Angle */}
+            <div className="grid gap-3">
+              <div className="flex justify-between">
+                <Label className="text-white/80">Wind Direction</Label>
+                <span className="text-white/50 text-sm">{settings.windAngle}°</span>
+              </div>
+              <Slider
+                min={-45}
+                max={45}
+                value={[settings.windAngle]}
+                onValueChange={([v]) => setSettings(s => ({ ...s, windAngle: v }))}
+              />
+            </div>
+
+            {/* Drop Size */}
+            <div className="grid gap-3">
+              <div className="flex justify-between">
+                <Label className="text-white/80">Drop Size</Label>
+                <span className="text-white/50 text-sm">{settings.dropSize}</span>
+              </div>
+              <Slider
+                min={1}
+                max={10}
+                value={[settings.dropSize]}
+                onValueChange={([v]) => setSettings(s => ({ ...s, dropSize: v }))}
+              />
+            </div>
+
+            {/* Thunder */}
+            <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 p-4">
+              <Label className="flex items-center gap-2 text-white/80">
+                <Zap className="h-4 w-4" />
+                Thunder & Lightning
+              </Label>
+              <Switch
+                checked={settings.thunder}
+                onCheckedChange={(v) => setSettings(s => ({ ...s, thunder: v }))}
+              />
+            </div>
+
+            {settings.thunder && (
+              <div className="grid gap-3 pl-4">
+                <div className="flex justify-between">
+                  <Label className="text-white/70">Frequency</Label>
+                  <span className="text-white/50 text-sm">{settings.thunderFrequency}</span>
+                </div>
+                <Slider
+                  min={1}
+                  max={10}
+                  value={[settings.thunderFrequency]}
+                  onValueChange={([v]) => setSettings(s => ({ ...s, thunderFrequency: v }))}
+                />
+              </div>
+            )}
+
+            {/* Refresh */}
+            <Button
+              onClick={handleRefresh}
+              className="w-full bg-white/10 hover:bg-white/20 text-white"
+            >
+              <RotateCcw className="h-4 w-4 mr-2" />
+              Refresh Scene
+            </Button>
+          </div>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 };
 
-export default RainSimulatorPage;
+export default Index;
