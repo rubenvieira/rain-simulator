@@ -67,6 +67,26 @@ interface SplashParticle {
   maxLife: number;
 }
 
+// Puddle ripple ring spawned when drops hit the bottom
+interface PuddleRipple {
+  x: number;
+  radius: number;
+  maxRadius: number;
+  opacity: number;
+  speed: number;
+}
+
+// Crown splash ring on high-energy merges
+interface CrownSplash {
+  x: number;
+  y: number;
+  radius: number;
+  maxRadius: number;
+  opacity: number;
+  age: number;
+  maxAge: number;
+}
+
 // Wet streak left on glass by sliding drops
 interface WetStreak {
   points: { x: number; y: number; width: number }[];
@@ -139,6 +159,14 @@ const PERF = {
   enableBloom: !IS_LOW_PERF,
   enableFresnel: !IS_LOW_PERF,
   condensationUpdateInterval: IS_LOW_PERF ? 5000 : 2000,
+  // Realism enhancements
+  maxPuddleRipples: IS_LOW_PERF ? 10 : 30,
+  enablePuddleRipples: true,
+  enableGlassReflection: !IS_LOW_PERF,
+  maxCrownSplashes: IS_LOW_PERF ? 5 : 15,
+  enableCrownSplash: true,
+  enableSatelliteShedding: !IS_LOW_PERF,
+  enablePuddleReflections: !IS_LOW_PERF,
 };
 
 // ============================================================================
@@ -350,7 +378,7 @@ const Index = () => {
 
   // Refs for animation state
   const animationRef = useRef<number>(0);
-  const simulationRef = useRef<RainSimulation>(new RainSimulation(PERF.maxDroplets, PERF.rivuletCellSize, PERF.enableRivuletAttraction));
+  const simulationRef = useRef<RainSimulation>(new RainSimulation(PERF.maxDroplets, PERF.rivuletCellSize, PERF.enableRivuletAttraction, PERF.enableSatelliteShedding));
   const noiseRef = useRef<SimplexNoise>(new SimplexNoise());
   const timeRef = useRef(0);
   const lastTimeRef = useRef(0);
@@ -380,6 +408,8 @@ const Index = () => {
   // Puddle state at bottom of screen
   const puddleHeightRef = useRef(0);
   const puddleWavesRef = useRef<{ x: number; amp: number; freq: number; phase: number }[]>([]);
+  const puddleRipplesRef = useRef<PuddleRipple[]>([]);
+  const crownSplashesRef = useRef<CrownSplash[]>([]);
 
   // Condensation micro-drops
   const condensationRef = useRef<CondensationDrop[]>([]);
@@ -809,6 +839,31 @@ const Index = () => {
       }
       } catch (e) { console.warn('Layer 2.6 condensation error:', e); }
 
+      // === LAYER 2.7: GLASS SURFACE REFLECTION ===
+      // Real glass reflects ~4% of light at normal incidence
+      try {
+      if (PERF.enableGlassReflection) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = 0.03;
+        const orbs = bokehOrbsRef.current;
+        for (let i = 0; i < orbs.length; i++) {
+          const orb = orbs[i];
+          const pulse = 1 + Math.sin(orb.pulsePhase) * 0.12;
+          const r = orb.radius * pulse * 0.7;
+          const grad = ctx.createRadialGradient(orb.x, orb.y + 3, 0, orb.x, orb.y + 3, r);
+          grad.addColorStop(0, `hsla(${orb.hue}, ${orb.sat}%, ${orb.lightness}%, ${orb.opacity * 0.5})`);
+          grad.addColorStop(0.5, `hsla(${orb.hue}, ${orb.sat}%, ${orb.lightness}%, ${orb.opacity * 0.1})`);
+          grad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.beginPath();
+          ctx.arc(orb.x, orb.y + 3, r, 0, Math.PI * 2);
+          ctx.fillStyle = grad;
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+      } catch (e) { console.warn('Layer 2.7 glass reflection error:', e); }
+
       // === LAYER 3: BACKGROUND RAIN (behind glass) ===
       try {
       const windX = Math.sin(s.windAngle * Math.PI / 180) * (s.windSpeed / 100) * 8;
@@ -914,6 +969,17 @@ const Index = () => {
           drop.lastMergeEnergy = 0; // Only splash once per merge
           if (splashParticlesRef.current.length > PERF.maxSplash) {
             splashParticlesRef.current.splice(0, splashParticlesRef.current.length - PERF.maxSplash);
+          }
+          // Crown splash ring on high-energy merges
+          if (PERF.enableCrownSplash && drop.mass > 20 && crownSplashesRef.current.length < PERF.maxCrownSplashes) {
+            crownSplashesRef.current.push({
+              x: drop.x, y: drop.y,
+              radius: drop.baseRadius,
+              maxRadius: drop.baseRadius * 3,
+              opacity: 0.5,
+              age: 0,
+              maxAge: 300,
+            });
           }
         }
       }
@@ -1293,7 +1359,33 @@ const Index = () => {
         ctx.stroke();
         ctx.restore();
 
-        // 8. DROP SHADOW (subtle, beneath, offset by light direction)
+        // 8. LIGHTNING FLASH INTERACTION
+        // During lightning, drops brighten with caustic glow
+        if (flash > 0.05 && drop.baseRadius > 3) {
+          ctx.save();
+          drawDropPath(ctx, dx, dy, rx, ry, shape, timestamp);
+          ctx.clip();
+          ctx.globalCompositeOperation = 'lighter';
+          // Bright caustic inside drop during flash
+          const flashGrad = ctx.createRadialGradient(
+            dx - rx * 0.2, dy - ry * 0.2, 0,
+            dx, dy, maxR
+          );
+          flashGrad.addColorStop(0, `rgba(220, 235, 255, ${flash * 0.25})`);
+          flashGrad.addColorStop(0.4, `rgba(200, 220, 255, ${flash * 0.1})`);
+          flashGrad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = flashGrad;
+          ctx.fill();
+          // Intensified rim during flash
+          drawDropPath(ctx, dx, dy, rx, ry, shape, timestamp);
+          ctx.strokeStyle = `rgba(200, 220, 255, ${flash * 0.15})`;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          ctx.restore();
+          ctx.globalAlpha = drop.opacity;
+        }
+
+        // 9. DROP SHADOW (subtle, beneath, offset by light direction)
         ctx.save();
         ctx.globalCompositeOperation = 'destination-over';
         drawDropPath(ctx, dx + 1.5, dy + 2.5, rx * 0.93, ry * 0.93, shape, timestamp);
@@ -1403,6 +1495,38 @@ const Index = () => {
         ctx.restore();
       }
 
+      // === LAYER 6.65: CROWN SPLASH RINGS ===
+      const crowns = crownSplashesRef.current;
+      for (let i = crowns.length - 1; i >= 0; i--) {
+        const c = crowns[i];
+        c.age += deltaTime;
+        if (c.age > c.maxAge) {
+          crowns.splice(i, 1);
+          continue;
+        }
+        const progress = c.age / c.maxAge;
+        c.radius = c.radius + (c.maxRadius - c.radius) * progress;
+        c.opacity = 0.5 * (1 - progress);
+
+        ctx.save();
+        ctx.globalAlpha = c.opacity;
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, c.radius, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(200, 220, 255, ${c.opacity})`;
+        ctx.lineWidth = Math.max(0.5, 1.5 * (1 - progress));
+        ctx.stroke();
+        // Second inner ring
+        if (c.radius > 5) {
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, c.radius * 0.6, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(200, 220, 255, ${c.opacity * 0.4})`;
+          ctx.lineWidth = 0.5;
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
       // === LAYER 6.7: PUDDLE AT BOTTOM ===
       // Grow puddle based on drops reaching the bottom
       const targetPuddleH = Math.min(height * 0.06, (s.intensity / 100) * height * 0.05 + 2);
@@ -1433,6 +1557,24 @@ const Index = () => {
         ctx.fillStyle = puddleGrad;
         ctx.fillRect(0, puddleY - 5, width, puddleH + 5);
 
+        // Spawn puddle ripples from drops near the bottom
+        if (PERF.enablePuddleRipples) {
+          for (let i = 0; i < droplets.length; i++) {
+            const drop = droplets[i];
+            if (drop.y > puddleY - drop.baseRadius && drop.vy > 0.3 && drop.opacity > 0.3) {
+              if (puddleRipplesRef.current.length < PERF.maxPuddleRipples) {
+                puddleRipplesRef.current.push({
+                  x: drop.x,
+                  radius: drop.baseRadius * 0.5,
+                  maxRadius: drop.baseRadius * 6 + 20,
+                  opacity: Math.min(0.4, drop.mass * 0.01),
+                  speed: 0.8 + drop.mass * 0.02,
+                });
+              }
+            }
+          }
+        }
+
         // Reflective shimmer on puddle surface
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
@@ -1448,6 +1590,77 @@ const Index = () => {
           ctx.fillRect(0, waveY - 1, width, 4);
         }
         ctx.restore();
+
+        // Puddle ripple rings
+        if (PERF.enablePuddleRipples) {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          const ripples = puddleRipplesRef.current;
+          for (let i = ripples.length - 1; i >= 0; i--) {
+            const r = ripples[i];
+            r.radius += r.speed * dt;
+            r.opacity *= 0.97;
+            if (r.radius > r.maxRadius || r.opacity < 0.01) {
+              ripples.splice(i, 1);
+              continue;
+            }
+            // Outer ring
+            ctx.beginPath();
+            ctx.arc(r.x, puddleY + 2, r.radius, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(150, 180, 220, ${r.opacity})`;
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+            // Inner ring (trailing)
+            if (r.radius > 8) {
+              ctx.beginPath();
+              ctx.arc(r.x, puddleY + 2, r.radius * 0.65, 0, Math.PI * 2);
+              ctx.strokeStyle = `rgba(150, 180, 220, ${r.opacity * 0.4})`;
+              ctx.lineWidth = 0.5;
+              ctx.stroke();
+            }
+          }
+          ctx.restore();
+        }
+
+        // Puddle reflections of bokeh lights (desktop only)
+        if (PERF.enablePuddleReflections && puddleH > 3) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(0, puddleY - 2, width, puddleH + 7);
+          ctx.clip();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = 0.12;
+          const orbsForReflect = bokehOrbsRef.current;
+          for (let i = 0; i < orbsForReflect.length; i++) {
+            const orb = orbsForReflect[i];
+            const reflectY = puddleY + (height - orb.y) * (puddleH / height) * 0.5 + 3;
+            if (reflectY < puddleY - 2 || reflectY > height + 10) continue;
+            // Wave distortion
+            let waveOffsetX = 0;
+            for (let w = 0; w < waves.length; w++) {
+              const wave = waves[w];
+              waveOffsetX += Math.sin(wave.phase + orb.x * wave.freq) * wave.amp * 0.8;
+            }
+            const pulse = 1 + Math.sin(orb.pulsePhase) * 0.12;
+            const rr = orb.radius * pulse * 0.5;
+            const grad = ctx.createRadialGradient(
+              orb.x + waveOffsetX, reflectY, 0,
+              orb.x + waveOffsetX, reflectY, rr
+            );
+            grad.addColorStop(0, `hsla(${orb.hue}, ${orb.sat}%, ${orb.lightness}%, ${orb.opacity * 0.6})`);
+            grad.addColorStop(0.5, `hsla(${orb.hue}, ${orb.sat}%, ${orb.lightness}%, ${orb.opacity * 0.15})`);
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.beginPath();
+            ctx.save();
+            ctx.translate(orb.x + waveOffsetX, reflectY);
+            ctx.scale(1, 0.3); // squash vertically for perspective
+            ctx.arc(0, 0, rr, 0, Math.PI * 2);
+            ctx.restore();
+            ctx.fillStyle = grad;
+            ctx.fill();
+          }
+          ctx.restore();
+        }
       }
 
       // === LAYER 7: POST-PROCESSING ===
@@ -1612,19 +1825,44 @@ const Index = () => {
     }).connect(reverb);
     thunderSynth.volume.value = -10;
 
-    audioRef.current = { rainNoise, filter, thunderSynth };
+    // Wind audio: filtered pink noise that responds to wind speed
+    const windNoise = new Tone.Noise('pink').start();
+    const windFilter = new Tone.Filter(300, 'bandpass', -24).connect(reverb);
+    const windGain = new Tone.Gain(0).connect(windFilter);
+    windNoise.connect(windGain);
+    windNoise.volume.value = -20;
+    // High-frequency "howl" layer for strong wind
+    const windHowl = new Tone.Noise('white').start();
+    const howlFilter = new Tone.Filter(800, 'bandpass', -48).connect(reverb);
+    const howlGain = new Tone.Gain(0).connect(howlFilter);
+    windHowl.connect(howlGain);
+    windHowl.volume.value = -30;
+
+    audioRef.current = { rainNoise, filter, thunderSynth, windGain, windFilter, howlGain, howlFilter };
   };
 
   // Dynamic audio: link rain sound volume and filter to intensity/wind
   useEffect(() => {
     if (!audioRef.current?.rainNoise) return;
-    const { rainNoise, filter } = audioRef.current;
+    const { rainNoise, filter, windGain, windFilter, howlGain, howlFilter } = audioRef.current;
     // Map intensity 5-100 to volume -35 to -18 dB
     const targetVol = -35 + (settings.intensity / 100) * 17;
     rainNoise.volume.rampTo(targetVol, 0.5);
     // Wind increases filter cutoff for brighter rain sound
     const cutoff = 500 + (settings.windSpeed / 100) * 800 + (settings.intensity / 100) * 400;
     filter.frequency.rampTo(cutoff, 0.3);
+
+    // Wind audio: gain and filter track wind speed
+    const windLevel = settings.windSpeed / 100;
+    if (windGain && windFilter) {
+      windGain.gain.rampTo(windLevel * 0.4, 0.8);
+      windFilter.frequency.rampTo(200 + windLevel * 600, 0.5);
+    }
+    if (howlGain && howlFilter) {
+      const howlLevel = Math.max(0, (windLevel - 0.3) / 0.7);
+      howlGain.gain.rampTo(howlLevel * 0.15, 1.0);
+      howlFilter.frequency.rampTo(600 + windLevel * 1200, 0.5);
+    }
   }, [settings.intensity, settings.windSpeed]);
 
   // ============================================================================
@@ -1634,6 +1872,8 @@ const Index = () => {
     simulationRef.current.reset();
     dropShapesRef.current.clear();
     splashParticlesRef.current = [];
+    crownSplashesRef.current = [];
+    puddleRipplesRef.current = [];
     wetStreaksRef.current = [];
     lastDropPositionsRef.current.clear();
     puddleHeightRef.current = 0;

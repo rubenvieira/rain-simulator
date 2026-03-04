@@ -324,7 +324,8 @@ export class Droplet {
         canvasHeight: number,
         createTrailBead: (x: number, y: number, radius: number) => void,
         rivuletMap?: RivuletMap,
-        enableRivuletAttraction?: boolean
+        enableRivuletAttraction?: boolean,
+        createSatellite?: (x: number, y: number, mass: number, vx: number, vy: number) => void
     ): boolean {
         const dt = deltaTime / 16.67;
 
@@ -378,9 +379,18 @@ export class Droplet {
             }
         }
 
-        // Apply forces
-        this.vy += (gravity - resistanceForce * this.vy) * dt;
-        this.vx += (windForceX - resistanceForce * this.vx) * dt;
+        // Apply forces with quadratic drag (terminal velocity model)
+        // Terminal velocity: v_t ~ sqrt(mass) — heavier drops fall faster but plateau
+        const terminalVy = Math.sqrt(this.mass * 0.08) * (settings.gravity / 5);
+        const dragCoeffY = 0.015 / (this.mass * 0.1 + 1);
+        const vyDrag = dragCoeffY * this.vy * Math.abs(this.vy);
+        this.vy += (gravity - vyDrag) * dt;
+        this.vy = Math.min(this.vy, terminalVy * 1.2); // hard safety clamp
+
+        const terminalVx = windStrength * 2.0;
+        const dragCoeffX = 0.02 / (this.mass * 0.1 + 1);
+        const vxDrag = dragCoeffX * this.vx * Math.abs(this.vx);
+        this.vx += (windForceX - vxDrag) * dt;
 
         // Rivulet channel attraction
         if (enableRivuletAttraction && rivuletMap) {
@@ -448,6 +458,25 @@ export class Droplet {
             this.distanceSinceTrail = 0;
         }
 
+        // Satellite shedding: large fast drops shed small satellites from trailing edge
+        if (createSatellite && speed > 1.5 && this.mass > 25 && Math.random() < 0.003 * dt) {
+            const shedFraction = 0.05 + Math.random() * 0.1; // 5-15% of mass
+            const satMass = this.mass * shedFraction;
+            this.mass -= satMass;
+            this.baseRadius = this.calculateRadius(this.mass);
+            // Spawn at trailing edge
+            const norm = speed + 0.01;
+            const trailX = this.x - (this.vx / norm) * this.baseRadius * 1.5;
+            const trailY = this.y - (this.vy / norm) * this.baseRadius * 1.5;
+            // Satellite gets slight sideways velocity
+            const perpX = -this.vy / norm;
+            const perpY = this.vx / norm;
+            const side = Math.random() > 0.5 ? 1 : -1;
+            createSatellite(trailX, trailY, satMass,
+                this.vx * 0.3 + perpX * side * 0.5,
+                this.vy * 0.3 + perpY * side * 0.5);
+        }
+
         return this.y < canvasHeight + this.radius * 2;
     }
 
@@ -512,17 +541,19 @@ export class RainSimulation {
     maxDroplets: number = 500;
     rivuletMap: RivuletMap;
     enableRivuletAttraction: boolean;
+    enableSatelliteShedding: boolean;
     rivuletCellSize: number;
 
     // Gust intensity modulation
     intensityMod: number = 1;
 
-    constructor(maxDroplets: number = 500, rivuletCellSize: number = 8, enableRivuletAttraction: boolean = true) {
+    constructor(maxDroplets: number = 500, rivuletCellSize: number = 8, enableRivuletAttraction: boolean = true, enableSatelliteShedding: boolean = true) {
         this.noise = new SimplexNoise();
         this.gustNoise = new SimplexNoise(Math.random());
         this.maxDroplets = maxDroplets;
         this.rivuletCellSize = rivuletCellSize;
         this.enableRivuletAttraction = enableRivuletAttraction;
+        this.enableSatelliteShedding = enableSatelliteShedding;
         this.rivuletMap = new RivuletMap(1, 1, rivuletCellSize);
     }
 
@@ -556,6 +587,18 @@ export class RainSimulation {
     private createTrailBead = (x: number, y: number, radius: number) => {
         const persistence = this.currentSettings?.trailPersistence ?? 50;
         this.trailBeads.push(new TrailBead(x, y, radius, persistence));
+    };
+
+    private createSatellite = (x: number, y: number, mass: number, vx: number, vy: number) => {
+        if (this.droplets.length >= this.maxDroplets) return;
+        const settings = this.currentSettings;
+        if (!settings) return;
+        const sat = new Droplet(x, y, mass, settings);
+        sat.vx = vx;
+        sat.vy = vy;
+        sat.opacity = 1;
+        sat.isStuck = false;
+        this.droplets.push(sat);
     };
 
     update(deltaTime: number, settings: RainSettings): void {
@@ -621,7 +664,7 @@ export class RainSimulation {
         for (let i = this.droplets.length - 1; i >= 0; i--) {
             const droplet = this.droplets[i];
 
-            if (!droplet.update(deltaTime, settings, windNoise, this.canvasHeight, this.createTrailBead, this.rivuletMap, this.enableRivuletAttraction)) {
+            if (!droplet.update(deltaTime, settings, windNoise, this.canvasHeight, this.createTrailBead, this.rivuletMap, this.enableRivuletAttraction, this.enableSatelliteShedding ? this.createSatellite : undefined)) {
                 this.droplets.splice(i, 1);
                 continue;
             }
