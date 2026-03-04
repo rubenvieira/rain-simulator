@@ -647,9 +647,8 @@ const Index = () => {
       const dt = deltaTime / 16.67;
       const s = settingsRef.current;
 
-      try {
-
       // === LAYER 1: BLURRED BACKGROUND + BOKEH ===
+      try {
       if (bgLayerRef.current) {
         ctx.drawImage(bgLayerRef.current, 0, 0);
       } else {
@@ -703,9 +702,11 @@ const Index = () => {
         ctx.restore();
       }
 
+      } catch (e) { console.warn('Layer 1 error:', e); }
+
       // === LAYER 2: CONDENSATION FOG (with breathing) ===
+      try {
       if (s.fogDensity > 0 && PERF.enableFog) {
-        // Fog breathing: slow oscillation of effective density
         const fogBreath = 1 + Math.sin(timestamp * 0.0002) * 0.15 + Math.sin(timestamp * 0.00007) * 0.1;
         const effectiveFogDensity = s.fogDensity * fogBreath;
         if (timestamp - fogLastUpdateRef.current > PERF.fogUpdateInterval) {
@@ -716,9 +717,10 @@ const Index = () => {
           ctx.drawImage(fogCanvasRef.current, 0, 0, width, height);
         }
       }
+      } catch (e) { console.warn('Layer 2 fog error:', e); }
 
       // === LAYER 2.5: RIVULET CHANNELS ===
-      // Render to offscreen canvas periodically (every 150ms) to avoid 32K+ draw calls per frame
+      try {
       const rivMap = sim.rivuletMap;
       if (timestamp - rivuletLastUpdateRef.current > 150) {
         rivuletLastUpdateRef.current = timestamp;
@@ -728,18 +730,20 @@ const Index = () => {
           rc.height = height;
           rivuletCanvasRef.current = rc;
         }
-        const rCtx = rivuletCanvasRef.current.getContext('2d')!;
-        rCtx.clearRect(0, 0, width, height);
-        const rivData = rivMap.getData();
-        const rivCols = rivMap.cols;
-        const rivRows = rivMap.rows;
-        const rivCell = rivMap.cellSize;
-        for (let r = 0; r < rivRows; r++) {
-          for (let c = 0; c < rivCols; c++) {
-            const strength = rivData[r * rivCols + c];
-            if (strength > 0.05) {
-              rCtx.fillStyle = `rgba(0, 5, 15, ${strength * 0.08})`;
-              rCtx.fillRect(c * rivCell, r * rivCell, rivCell, rivCell);
+        const rCtx = rivuletCanvasRef.current.getContext('2d');
+        if (rCtx) {
+          rCtx.clearRect(0, 0, width, height);
+          const rivData = rivMap.getData();
+          const rivCols = rivMap.cols;
+          const rivRows = rivMap.rows;
+          const rivCell = rivMap.cellSize;
+          for (let r = 0; r < rivRows; r++) {
+            for (let c = 0; c < rivCols; c++) {
+              const strength = rivData[r * rivCols + c];
+              if (strength > 0.05) {
+                rCtx.fillStyle = `rgba(0, 5, 15, ${strength * 0.08})`;
+                rCtx.fillRect(c * rivCell, r * rivCell, rivCell, rivCell);
+              }
             }
           }
         }
@@ -747,8 +751,10 @@ const Index = () => {
       if (rivuletCanvasRef.current) {
         ctx.drawImage(rivuletCanvasRef.current, 0, 0);
       }
+      } catch (e) { console.warn('Layer 2.5 rivulet error:', e); }
 
       // === LAYER 2.6: CONDENSATION MICRO-DROPS ===
+      try {
       if ((s.condensation ?? 60) > 0) {
         const now = timestamp;
         if (now - condensationLastUpdateRef.current > PERF.condensationUpdateInterval || !condensationCanvasRef.current) {
@@ -757,46 +763,48 @@ const Index = () => {
           const microDrops = generateCondensation(width, height, count);
           condensationRef.current = microDrops;
 
-          // Render to offscreen canvas
           if (!condensationCanvasRef.current || condensationCanvasRef.current.width !== width) {
             const cc = document.createElement('canvas');
             cc.width = width;
             cc.height = height;
             condensationCanvasRef.current = cc;
           }
-          const cCtx = condensationCanvasRef.current.getContext('2d')!;
-          cCtx.clearRect(0, 0, width, height);
-          for (const cd of microDrops) {
-            cCtx.beginPath();
-            cCtx.arc(cd.x, cd.y, cd.radius, 0, Math.PI * 2);
-            cCtx.fillStyle = `rgba(180, 200, 220, ${cd.opacity * 0.15})`;
-            cCtx.fill();
-            if (cd.radius > 1) {
+          const cCtx = condensationCanvasRef.current.getContext('2d');
+          if (cCtx) {
+            cCtx.clearRect(0, 0, width, height);
+            for (const cd of microDrops) {
               cCtx.beginPath();
-              cCtx.arc(cd.x - cd.radius * 0.3, cd.y - cd.radius * 0.3, Math.max(0.5, cd.radius * 0.25), 0, Math.PI * 2);
-              cCtx.fillStyle = `rgba(255, 255, 255, ${cd.opacity * 0.4})`;
+              cCtx.arc(cd.x, cd.y, cd.radius, 0, Math.PI * 2);
+              cCtx.fillStyle = `rgba(180, 200, 220, ${cd.opacity * 0.15})`;
+              cCtx.fill();
+              if (cd.radius > 1) {
+                cCtx.beginPath();
+                cCtx.arc(cd.x - cd.radius * 0.3, cd.y - cd.radius * 0.3, Math.max(0.5, cd.radius * 0.25), 0, Math.PI * 2);
+                cCtx.fillStyle = `rgba(255, 255, 255, ${cd.opacity * 0.4})`;
+                cCtx.fill();
+              }
+            }
+            const mainDroplets = sim.getDroplets();
+            cCtx.globalCompositeOperation = 'destination-out';
+            for (let d = 0; d < mainDroplets.length; d++) {
+              const md = mainDroplets[d];
+              const clearR = md.baseRadius * 3;
+              cCtx.beginPath();
+              cCtx.arc(md.x, md.y, clearR, 0, Math.PI * 2);
+              cCtx.fillStyle = 'rgba(0,0,0,1)';
               cCtx.fill();
             }
+            cCtx.globalCompositeOperation = 'source-over';
           }
-          // Clear condensation near main droplets using canvas compositing (fast)
-          const mainDroplets = sim.getDroplets();
-          cCtx.globalCompositeOperation = 'destination-out';
-          for (let d = 0; d < mainDroplets.length; d++) {
-            const md = mainDroplets[d];
-            const clearR = md.baseRadius * 3;
-            cCtx.beginPath();
-            cCtx.arc(md.x, md.y, clearR, 0, Math.PI * 2);
-            cCtx.fillStyle = 'rgba(0,0,0,1)';
-            cCtx.fill();
-          }
-          cCtx.globalCompositeOperation = 'source-over';
         }
         if (condensationCanvasRef.current) {
           ctx.drawImage(condensationCanvasRef.current, 0, 0);
         }
       }
+      } catch (e) { console.warn('Layer 2.6 condensation error:', e); }
 
       // === LAYER 3: BACKGROUND RAIN (behind glass) ===
+      try {
       const windX = Math.sin(s.windAngle * Math.PI / 180) * (s.windSpeed / 100) * 8;
 
       ctx.save();
@@ -804,12 +812,10 @@ const Index = () => {
       const streaks = bgRainRef.current;
       for (let i = 0; i < streaks.length; i++) {
         const streak = streaks[i];
-        // Far streaks: reduced wind response
         const windResponse = streak.z < 0.33 ? 0.4 : (streak.z > 0.66 ? 1.3 : 1.0);
         streak.x += windX * streak.z * windResponse * dt;
         streak.y += streak.speed * dt;
 
-        // Near streaks: slight horizontal turbulence
         if (streak.z > 0.66) {
           streak.x += Math.sin(timestamp * 0.003 + streak.y * 0.01) * 0.3 * dt;
         }
@@ -837,6 +843,7 @@ const Index = () => {
         ctx.stroke();
       }
       ctx.restore();
+      } catch (e) { console.warn('Layer 3 bg rain error:', e); }
 
       // === LAYER 4: SIMULATION UPDATE ===
       sim.update(deltaTime, s);
@@ -906,7 +913,7 @@ const Index = () => {
       }
 
       // === LAYER 6: WATER DROPS ON GLASS (HERO ELEMENT) ===
-
+      try {
       // First pass: draw wet halos beneath all drops (contact shadow on glass)
       for (let i = 0; i < droplets.length; i++) {
         const drop = droplets[i];
@@ -1291,6 +1298,8 @@ const Index = () => {
         ctx.restore();
       }
 
+      } catch (e) { console.warn('Layer 6 drop render error:', e); }
+
       // === LAYER 6.5: WET STREAKS on glass ===
       // Track moving drops and create wet streaks
       const lastPos = lastDropPositionsRef.current;
@@ -1436,6 +1445,7 @@ const Index = () => {
       }
 
       // === LAYER 7: POST-PROCESSING ===
+      try {
 
       // Anamorphic bloom (desktop only, every other frame)
       if (PERF.enableBloom) {
@@ -1455,26 +1465,26 @@ const Index = () => {
             wc.height = bh;
             bloomWorkCanvasRef.current = wc;
           }
-          const wCtx = bloomWorkCanvasRef.current.getContext('2d')!;
-          wCtx.clearRect(0, 0, bw, bh);
-          // Draw bright specular positions as white dots to work canvas
-          for (let i = 0; i < droplets.length; i++) {
-            const drop = droplets[i];
-            if (drop.baseRadius > 5 && drop.opacity > 0.5) {
-              const bx = (drop.x - drop.baseRadius * 0.3) / 4;
-              const by = (drop.y - drop.baseRadius * 0.33) / 4;
-              wCtx.beginPath();
-              wCtx.arc(bx, by, Math.max(1, drop.baseRadius * 0.06), 0, Math.PI * 2);
-              wCtx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-              wCtx.fill();
+          const wCtx = bloomWorkCanvasRef.current.getContext('2d');
+          const bCtx = bloomCanvasRef.current.getContext('2d');
+          if (wCtx && bCtx) {
+            wCtx.clearRect(0, 0, bw, bh);
+            for (let i = 0; i < droplets.length; i++) {
+              const drop = droplets[i];
+              if (drop.baseRadius > 5 && drop.opacity > 0.5) {
+                const bx = (drop.x - drop.baseRadius * 0.3) / 4;
+                const by = (drop.y - drop.baseRadius * 0.33) / 4;
+                wCtx.beginPath();
+                wCtx.arc(bx, by, Math.max(1, drop.baseRadius * 0.06), 0, Math.PI * 2);
+                wCtx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+                wCtx.fill();
+              }
             }
+            bCtx.clearRect(0, 0, bw, bh);
+            bCtx.filter = 'blur(8px)';
+            bCtx.drawImage(bloomWorkCanvasRef.current, 0, 0);
+            bCtx.filter = 'none';
           }
-          // Blur from work canvas to bloom canvas (never self-draw)
-          const bCtx = bloomCanvasRef.current.getContext('2d')!;
-          bCtx.clearRect(0, 0, bw, bh);
-          bCtx.filter = 'blur(8px)';
-          bCtx.drawImage(bloomWorkCanvasRef.current, 0, 0);
-          bCtx.filter = 'none';
         }
         if (bloomCanvasRef.current) {
           ctx.save();
@@ -1525,10 +1535,7 @@ const Index = () => {
       ctx.fillRect(0, 0, width, height);
       ctx.restore();
 
-      } catch (e) {
-        // Prevent render errors from killing the animation loop
-        console.warn('Rain render error:', e);
-      }
+      } catch (e) { console.warn('Layer 7 post-process error:', e); }
     };
 
     animationRef.current = requestAnimationFrame(animate);
