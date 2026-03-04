@@ -56,8 +56,12 @@ interface BackgroundRainStreak {
 
 // Shape perturbations for organic drop outlines
 interface DropShape {
-  perturbations: number[];
+  perturbations: number[];  // base shape
   numPoints: number;
+  wobblePhase: number;      // current wobble offset for animation
+  wobbleSpeed: number;      // how fast wobble oscillates
+  wobbleAmp: number;        // wobble amplitude (scales with recent merge/speed)
+  gravityBulge: number;     // 0-1: how pear-shaped the drop is (higher = more teardrop)
 }
 
 const DEFAULT_SETTINGS: RainSettings = {
@@ -85,33 +89,67 @@ function generateDropShape(complexity: number = 14): DropShape {
   for (let i = 0; i < complexity; i++) {
     raw.push(0.88 + Math.random() * 0.24);
   }
-  // Smooth perturbations
-  const smoothed = raw.map((val, i) => {
+  // Double-pass smoothing for organic curves
+  let smoothed = raw.map((val, i) => {
     const prev = raw[(i - 1 + complexity) % complexity];
     const next = raw[(i + 1) % complexity];
-    return (prev * 0.25 + val * 0.5 + next * 0.25);
+    return prev * 0.25 + val * 0.5 + next * 0.25;
   });
-  return { perturbations: smoothed, numPoints: complexity };
+  smoothed = smoothed.map((val, i) => {
+    const prev = smoothed[(i - 1 + complexity) % complexity];
+    const next = smoothed[(i + 1) % complexity];
+    return prev * 0.2 + val * 0.6 + next * 0.2;
+  });
+  return {
+    perturbations: smoothed,
+    numPoints: complexity,
+    wobblePhase: Math.random() * Math.PI * 2,
+    wobbleSpeed: 1.5 + Math.random() * 2.5,
+    wobbleAmp: 0.02 + Math.random() * 0.02,
+    gravityBulge: 0,
+  };
 }
 
 function drawDropPath(
   ctx: CanvasRenderingContext2D,
   x: number, y: number,
   rx: number, ry: number,
-  shape: DropShape
+  shape: DropShape,
+  time: number = 0
 ) {
-  const { perturbations, numPoints } = shape;
+  const { perturbations, numPoints, wobblePhase, wobbleSpeed, wobbleAmp, gravityBulge } = shape;
   const points: { x: number; y: number }[] = [];
+  const wobbleT = time * 0.001 * wobbleSpeed + wobblePhase;
+
   for (let i = 0; i < numPoints; i++) {
     const angle = (i / numPoints) * Math.PI * 2;
-    const r = perturbations[i];
+    let r = perturbations[i];
+
+    // Wobble: sinusoidal deformation that oscillates over time
+    // Use different frequencies per point for organic feel
+    const wobble = Math.sin(wobbleT + i * 1.7) * wobbleAmp +
+                   Math.sin(wobbleT * 1.3 + i * 2.3) * wobbleAmp * 0.5;
+    r += wobble;
+
+    // Gravity bulge: bottom half expands, top half contracts (pear/teardrop)
+    // sin(angle) > 0 means bottom half, < 0 means top half
+    const sinA = Math.sin(angle);
+    const bulgeEffect = gravityBulge * 0.25;
+    if (sinA > 0) {
+      // Bottom: expand outward
+      r += sinA * bulgeEffect;
+    } else {
+      // Top: contract inward, narrow to a point
+      r += sinA * bulgeEffect * 0.6;
+    }
+
     points.push({
       x: x + Math.cos(angle) * rx * r,
       y: y + Math.sin(angle) * ry * r,
     });
   }
+
   ctx.beginPath();
-  // Start at midpoint between first and last
   const startX = (points[0].x + points[numPoints - 1].x) / 2;
   const startY = (points[0].y + points[numPoints - 1].y) / 2;
   ctx.moveTo(startX, startY);
@@ -551,6 +589,74 @@ const Index = () => {
       }
 
       // === LAYER 6: WATER DROPS ON GLASS (HERO ELEMENT) ===
+
+      // First pass: draw wet halos beneath all drops (contact shadow on glass)
+      for (let i = 0; i < droplets.length; i++) {
+        const drop = droplets[i];
+        if (drop.opacity <= 0) continue;
+        const rx = drop.baseRadius * drop.stretchX;
+        const ry = drop.baseRadius * drop.stretchY;
+        if (rx < 2 || ry < 2) continue;
+
+        // Wet halo: darker ring around the drop where glass is wet
+        const haloRx = rx * 1.35;
+        const haloRy = ry * 1.3;
+        const haloGrad = ctx.createRadialGradient(
+          drop.x, drop.y, Math.max(rx, ry) * 0.7,
+          drop.x, drop.y, Math.max(haloRx, haloRy)
+        );
+        haloGrad.addColorStop(0, `rgba(0, 0, 0, ${0.06 * drop.opacity})`);
+        haloGrad.addColorStop(0.5, `rgba(0, 5, 15, ${0.04 * drop.opacity})`);
+        haloGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.beginPath();
+        ctx.ellipse(drop.x, drop.y, haloRx, haloRy, 0, 0, Math.PI * 2);
+        ctx.fillStyle = haloGrad;
+        ctx.fill();
+      }
+
+      // Second pass: draw water film connections between moving drops and trail beads
+      for (let i = 0; i < droplets.length; i++) {
+        const drop = droplets[i];
+        if (drop.opacity <= 0 || drop.isStuck) continue;
+        const speed = Math.sqrt(drop.vx * drop.vx + drop.vy * drop.vy);
+        if (speed < 0.3) continue;
+
+        // Find trail beads that belong to this drop (nearby and above it)
+        const nearTrails: TrailBead[] = [];
+        for (let t = 0; t < trails.length; t++) {
+          const trail = trails[t];
+          const tdx = trail.x - drop.x;
+          const tdy = trail.y - drop.y;
+          const dist = Math.sqrt(tdx * tdx + tdy * tdy);
+          // Trails should be above the drop and within reasonable distance
+          if (tdy < 0 && dist < drop.baseRadius * 8 && Math.abs(tdx) < drop.baseRadius * 3) {
+            nearTrails.push(trail);
+          }
+        }
+
+        if (nearTrails.length > 0) {
+          // Sort by y (top to bottom)
+          nearTrails.sort((a, b) => a.y - b.y);
+
+          // Draw thin water film from trail beads down to the drop
+          ctx.save();
+          ctx.globalAlpha = drop.opacity * 0.12;
+          ctx.beginPath();
+          ctx.moveTo(nearTrails[0].x, nearTrails[0].y);
+          for (let t = 1; t < nearTrails.length; t++) {
+            ctx.lineTo(nearTrails[t].x, nearTrails[t].y);
+          }
+          ctx.lineTo(drop.x, drop.y - drop.baseRadius * drop.stretchY * 0.5);
+          ctx.strokeStyle = 'rgba(180, 200, 230, 0.6)';
+          ctx.lineWidth = Math.max(0.5, drop.baseRadius * 0.15);
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      // Main pass: render each droplet with full detail
       for (let i = 0; i < droplets.length; i++) {
         const drop = droplets[i];
         if (drop.opacity <= 0) continue;
@@ -565,8 +671,21 @@ const Index = () => {
         // Get or create organic shape for this drop
         let shape = dropShapesRef.current.get(drop);
         if (!shape) {
-          shape = generateDropShape(rx > 10 ? 16 : 10);
+          shape = generateDropShape(rx > 10 ? 18 : rx > 5 ? 14 : 10);
           dropShapesRef.current.set(drop, shape);
+        }
+
+        // Update gravity bulge based on velocity (moving drops become pear-shaped)
+        const speed = Math.sqrt(drop.vx * drop.vx + drop.vy * drop.vy);
+        const targetBulge = Math.min(1, speed * 0.6);
+        shape.gravityBulge += (targetBulge - shape.gravityBulge) * 0.08;
+
+        // Boost wobble amplitude after merges (detected by stretchY > 1.1)
+        if (drop.stretchY > 1.15) {
+          shape.wobbleAmp = Math.min(0.08, shape.wobbleAmp + 0.005);
+        } else {
+          shape.wobbleAmp *= 0.995; // Slowly decay wobble
+          shape.wobbleAmp = Math.max(0.015, shape.wobbleAmp);
         }
 
         ctx.save();
@@ -575,15 +694,46 @@ const Index = () => {
         // 1. REFRACTION: Clip to organic shape, draw inverted magnified background
         if (bgLayerRef.current) {
           ctx.save();
-          drawDropPath(ctx, dx, dy, rx * 1.05, ry, shape);
+          drawDropPath(ctx, dx, dy, rx * 1.05, ry, shape, timestamp);
           ctx.clip();
 
-          const scale = 1.15 + (drop.baseRadius / 50) * 0.25;
-          const srcW = rx * 2 * scale;
-          const srcH = ry * 2 * scale;
+          const baseScale = 1.15 + (drop.baseRadius / 50) * 0.25;
 
-          // Vertical flip for lens inversion on larger drops
-          if (drop.baseRadius > 6) {
+          // Barrel distortion approximation: draw multiple concentric rings
+          // at slightly increasing magnification. Center is more magnified.
+          if (drop.baseRadius > 10) {
+            // 3-ring barrel distortion for large drops
+            const rings = 3;
+            for (let ring = rings - 1; ring >= 0; ring--) {
+              const t = ring / rings;
+              const ringScale = baseScale + t * 0.12; // Center ring is most magnified
+              const ringAlpha = ring === 0 ? 1 : 0.25;
+              const srcW = rx * 2 * ringScale;
+              const srcH = ry * 2 * ringScale;
+
+              ctx.globalAlpha = ringAlpha;
+
+              // Vertical flip for lens inversion
+              ctx.save();
+              ctx.translate(dx, dy);
+              ctx.scale(1, -1);
+              ctx.translate(-dx, -dy);
+              ctx.drawImage(
+                bgLayerRef.current!,
+                Math.max(0, dx - srcW / 2),
+                Math.max(0, dy - srcH / 2),
+                Math.min(srcW, width),
+                Math.min(srcH, height),
+                dx - rx, dy - ry,
+                rx * 2, ry * 2
+              );
+              ctx.restore();
+            }
+            ctx.globalAlpha = drop.opacity;
+          } else if (drop.baseRadius > 5) {
+            // Medium drops: simple flip + magnify
+            const srcW = rx * 2 * baseScale;
+            const srcH = ry * 2 * baseScale;
             ctx.save();
             ctx.translate(dx, dy);
             ctx.scale(1, -1);
@@ -599,6 +749,9 @@ const Index = () => {
             );
             ctx.restore();
           } else {
+            // Small drops: simple magnify, no flip
+            const srcW = rx * 2 * baseScale;
+            const srcH = ry * 2 * baseScale;
             ctx.drawImage(
               bgLayerRef.current,
               Math.max(0, dx - srcW / 2),
@@ -610,26 +763,31 @@ const Index = () => {
             );
           }
 
-          // Slight chromatic aberration inside the drop
-          if (drop.baseRadius > 8) {
-            ctx.globalAlpha = 0.04;
+          // Chromatic aberration: offset red/blue channels slightly
+          if (drop.baseRadius > 7) {
+            const caOffset = Math.min(2, drop.baseRadius * 0.08);
+            const srcW = rx * 2 * baseScale;
+            const srcH = ry * 2 * baseScale;
+            ctx.globalAlpha = 0.035;
             ctx.globalCompositeOperation = 'lighter';
+            // Red shift left
             ctx.drawImage(
               bgLayerRef.current,
-              Math.max(0, dx - srcW / 2 - 1),
+              Math.max(0, dx - srcW / 2 - caOffset),
               Math.max(0, dy - srcH / 2),
               Math.min(srcW, width),
               Math.min(srcH, height),
-              dx - rx - 1, dy - ry,
+              dx - rx - caOffset, dy - ry,
               rx * 2, ry * 2
             );
+            // Blue shift right
             ctx.drawImage(
               bgLayerRef.current,
-              Math.max(0, dx - srcW / 2 + 1),
+              Math.max(0, dx - srcW / 2 + caOffset),
               Math.max(0, dy - srcH / 2),
               Math.min(srcW, width),
               Math.min(srcH, height),
-              dx - rx + 1, dy - ry,
+              dx - rx + caOffset, dy - ry,
               rx * 2, ry * 2
             );
             ctx.globalCompositeOperation = 'source-over';
@@ -639,69 +797,139 @@ const Index = () => {
           ctx.restore();
         }
 
-        // 2. INNER SHADOW (3D volume/depth)
-        drawDropPath(ctx, dx, dy, rx, ry, shape);
+        // 2. INNER SHADOW (3D volume/depth) - asymmetric for realism
+        drawDropPath(ctx, dx, dy, rx, ry, shape, timestamp);
         const shadowGrad = ctx.createRadialGradient(
-          dx, dy + ry * 0.35, 0,
+          dx - rx * 0.1, dy + ry * 0.35, 0,
           dx, dy, Math.max(rx, ry)
         );
-        shadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0.3)');
-        shadowGrad.addColorStop(0.45, 'rgba(0, 0, 0, 0.12)');
+        shadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0.32)');
+        shadowGrad.addColorStop(0.3, 'rgba(0, 0, 0, 0.18)');
+        shadowGrad.addColorStop(0.65, 'rgba(0, 0, 0, 0.06)');
         shadowGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
         ctx.fillStyle = shadowGrad;
         ctx.fill();
 
-        // 3. CAUSTIC EDGE GLOW
-        drawDropPath(ctx, dx, dy, rx, ry, shape);
+        // 3. CAUSTIC EDGE GLOW - brighter on bottom where light concentrates
+        drawDropPath(ctx, dx, dy, rx, ry, shape, timestamp);
+        const maxR = Math.max(rx, ry);
         const causticGrad = ctx.createRadialGradient(
-          dx, dy, Math.max(rx, ry) * 0.55,
-          dx, dy, Math.max(rx, ry) * 1.05
+          dx, dy, maxR * 0.5,
+          dx, dy, maxR * 1.08
         );
         causticGrad.addColorStop(0, 'rgba(255, 255, 255, 0)');
-        causticGrad.addColorStop(0.6, 'rgba(200, 220, 255, 0)');
-        causticGrad.addColorStop(0.82, 'rgba(200, 220, 255, 0.12)');
-        causticGrad.addColorStop(0.94, 'rgba(230, 240, 255, 0.2)');
-        causticGrad.addColorStop(1, 'rgba(255, 255, 255, 0.06)');
+        causticGrad.addColorStop(0.55, 'rgba(200, 220, 255, 0)');
+        causticGrad.addColorStop(0.78, 'rgba(200, 220, 255, 0.1)');
+        causticGrad.addColorStop(0.92, 'rgba(230, 240, 255, 0.22)');
+        causticGrad.addColorStop(1, 'rgba(255, 255, 255, 0.05)');
         ctx.fillStyle = causticGrad;
         ctx.fill();
 
-        // 4. PRIMARY SPECULAR HIGHLIGHT (top-left, sharp)
-        const hlX = dx - rx * 0.32;
-        const hlY = dy - ry * 0.35;
-        const hlR = Math.min(rx, ry) * 0.28;
+        // Concentrated caustic at the bottom (light focus point)
+        if (drop.baseRadius > 5) {
+          const focusY = dy + ry * 0.55;
+          const focusR = rx * 0.4;
+          const focusGrad = ctx.createRadialGradient(dx, focusY, 0, dx, focusY, focusR);
+          focusGrad.addColorStop(0, 'rgba(255, 255, 255, 0.12)');
+          focusGrad.addColorStop(0.5, 'rgba(220, 235, 255, 0.05)');
+          focusGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+          ctx.beginPath();
+          ctx.arc(dx, focusY, focusR, 0, Math.PI * 2);
+          ctx.fillStyle = focusGrad;
+          ctx.fill();
+        }
+
+        // 4. INTERNAL COLOR CAUSTICS from nearby bokeh lights
+        // Check if any bokeh orb is "behind" this drop and tint the drop interior
+        if (drop.baseRadius > 6) {
+          const orbs = bokehOrbsRef.current;
+          for (let b = 0; b < orbs.length; b++) {
+            const orb = orbs[b];
+            const bdx = dx - orb.x;
+            const bdy = dy - orb.y;
+            const bDist = Math.sqrt(bdx * bdx + bdy * bdy);
+            // If drop is within the bokeh orb's influence radius
+            if (bDist < orb.radius * 1.5 + drop.baseRadius) {
+              const influence = Math.max(0, 1 - bDist / (orb.radius * 1.5 + drop.baseRadius));
+              const colorAlpha = influence * orb.opacity * 0.35;
+              if (colorAlpha > 0.005) {
+                ctx.save();
+                drawDropPath(ctx, dx, dy, rx * 0.85, ry * 0.85, shape, timestamp);
+                ctx.clip();
+                ctx.globalCompositeOperation = 'lighter';
+                const tintGrad = ctx.createRadialGradient(
+                  dx - bdx * 0.3, dy - bdy * 0.3, 0,
+                  dx, dy, maxR * 0.9
+                );
+                tintGrad.addColorStop(0, `hsla(${orb.hue}, ${orb.sat}%, ${orb.lightness}%, ${colorAlpha})`);
+                tintGrad.addColorStop(0.6, `hsla(${orb.hue}, ${orb.sat}%, ${orb.lightness}%, ${colorAlpha * 0.3})`);
+                tintGrad.addColorStop(1, 'rgba(0,0,0,0)');
+                ctx.fillStyle = tintGrad;
+                ctx.fill();
+                ctx.restore();
+                ctx.globalAlpha = drop.opacity;
+                break; // Only strongest bokeh influence
+              }
+            }
+          }
+        }
+
+        // 5. PRIMARY SPECULAR HIGHLIGHT (top-left, sharp)
+        const hlX = dx - rx * 0.3;
+        const hlY = dy - ry * 0.33;
+        const hlR = Math.min(rx, ry) * (drop.baseRadius > 8 ? 0.26 : 0.3);
         const hlGrad = ctx.createRadialGradient(hlX, hlY, 0, hlX, hlY, hlR);
-        hlGrad.addColorStop(0, 'rgba(255, 255, 255, 0.92)');
-        hlGrad.addColorStop(0.25, 'rgba(255, 255, 255, 0.55)');
-        hlGrad.addColorStop(0.6, 'rgba(255, 255, 255, 0.12)');
+        hlGrad.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
+        hlGrad.addColorStop(0.2, 'rgba(255, 255, 255, 0.6)');
+        hlGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.15)');
         hlGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
         ctx.beginPath();
         ctx.arc(hlX, hlY, hlR, 0, Math.PI * 2);
         ctx.fillStyle = hlGrad;
         ctx.fill();
 
-        // 5. SECONDARY SPECULAR (softer, bottom-right)
-        const secX = dx + rx * 0.2;
-        const secY = dy + ry * 0.18;
-        const secR = Math.min(rx, ry) * 0.18;
+        // Tiny pinpoint highlight (crisp reflection dot)
+        if (drop.baseRadius > 4) {
+          const pinX = hlX + hlR * 0.1;
+          const pinY = hlY + hlR * 0.1;
+          const pinR = Math.max(1, hlR * 0.2);
+          ctx.beginPath();
+          ctx.arc(pinX, pinY, pinR, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+          ctx.fill();
+        }
+
+        // 6. SECONDARY SPECULAR (softer, bottom-right)
+        const secX = dx + rx * 0.22;
+        const secY = dy + ry * 0.2;
+        const secR = Math.min(rx, ry) * 0.16;
         const secGrad = ctx.createRadialGradient(secX, secY, 0, secX, secY, secR);
-        secGrad.addColorStop(0, 'rgba(255, 255, 255, 0.28)');
+        secGrad.addColorStop(0, 'rgba(255, 255, 255, 0.25)');
+        secGrad.addColorStop(0.6, 'rgba(255, 255, 255, 0.06)');
         secGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
         ctx.beginPath();
         ctx.arc(secX, secY, secR, 0, Math.PI * 2);
         ctx.fillStyle = secGrad;
         ctx.fill();
 
-        // 6. RIM LIGHT (thin bright edge)
-        drawDropPath(ctx, dx, dy, rx, ry, shape);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
-        ctx.lineWidth = 0.8;
+        // 7. RIM LIGHT (thin bright edge, stronger on light-facing side)
+        ctx.save();
+        drawDropPath(ctx, dx, dy, rx, ry, shape, timestamp);
+        // Partial rim: brighter on top-left
+        const rimGrad = ctx.createLinearGradient(dx - rx, dy - ry, dx + rx, dy + ry);
+        rimGrad.addColorStop(0, 'rgba(255, 255, 255, 0.18)');
+        rimGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.06)');
+        rimGrad.addColorStop(1, 'rgba(255, 255, 255, 0.03)');
+        ctx.strokeStyle = rimGrad;
+        ctx.lineWidth = drop.baseRadius > 8 ? 1.0 : 0.7;
         ctx.stroke();
+        ctx.restore();
 
-        // 7. DROP SHADOW (subtle, beneath)
+        // 8. DROP SHADOW (subtle, beneath, offset by light direction)
         ctx.save();
         ctx.globalCompositeOperation = 'destination-over';
-        drawDropPath(ctx, dx + 1, dy + 2, rx * 0.95, ry * 0.95, shape);
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';
+        drawDropPath(ctx, dx + 1.5, dy + 2.5, rx * 0.93, ry * 0.93, shape, timestamp);
+        ctx.fillStyle = `rgba(0, 0, 0, ${0.1 * drop.opacity})`;
         ctx.fill();
         ctx.restore();
 
