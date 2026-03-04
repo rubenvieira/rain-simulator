@@ -100,6 +100,26 @@ const DEFAULT_SETTINGS: RainSettings = {
   glassBlur: 60,
 };
 
+// Mobile detection and performance tier
+const isMobile = typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const isSmallScreen = typeof window !== 'undefined' && window.innerWidth < 768;
+const IS_LOW_PERF = isMobile || isSmallScreen;
+
+const PERF = {
+  maxDroplets: IS_LOW_PERF ? 150 : 500,
+  bgRainCount: IS_LOW_PERF ? 50 : 180,
+  maxBokeh: IS_LOW_PERF ? 15 : 80,
+  maxSplash: IS_LOW_PERF ? 40 : 200,
+  maxStreaks: IS_LOW_PERF ? 20 : 80,
+  enableFog: !IS_LOW_PERF,
+  enableChromaticAberration: !IS_LOW_PERF,
+  enableBarrelDistortion: !IS_LOW_PERF,
+  enableBokehCaustics: !IS_LOW_PERF,
+  enableWaterFilm: !IS_LOW_PERF,
+  enableGrain: !IS_LOW_PERF,
+  fogUpdateInterval: IS_LOW_PERF ? 500 : 120,
+};
+
 // ============================================================================
 // HELPERS
 // ============================================================================
@@ -188,7 +208,7 @@ function generateBokehField(
   height: number,
   intensity: number
 ): BokehOrb[] {
-  const count = Math.floor(30 + (intensity / 100) * 50);
+  const count = Math.min(PERF.maxBokeh, Math.floor(30 + (intensity / 100) * 50));
   const colors = [
     { hue: 40, sat: 90, lightness: 60 },   // warm yellow (sodium lamps)
     { hue: 25, sat: 95, lightness: 55 },   // orange
@@ -275,7 +295,7 @@ const Index = () => {
 
   // Refs for animation state
   const animationRef = useRef<number>(0);
-  const simulationRef = useRef<RainSimulation>(new RainSimulation());
+  const simulationRef = useRef<RainSimulation>(new RainSimulation(PERF.maxDroplets));
   const noiseRef = useRef<SimplexNoise>(new SimplexNoise());
   const timeRef = useRef(0);
   const lastTimeRef = useRef(0);
@@ -501,7 +521,7 @@ const Index = () => {
       canvas.height = height;
       sim.resize(width, height);
       buildBackgroundLayer(width, height, settingsRef.current);
-      bgRainRef.current = createBackgroundRainStreaks(width, height, 180);
+      bgRainRef.current = createBackgroundRainStreaks(width, height, PERF.bgRainCount);
     };
 
     initGrain();
@@ -512,7 +532,7 @@ const Index = () => {
     // Initialize simulation
     sim.resize(width, height);
     sim.populate(settingsRef.current);
-    bgRainRef.current = createBackgroundRainStreaks(width, height, 180);
+    bgRainRef.current = createBackgroundRainStreaks(width, height, PERF.bgRainCount);
 
     // Animation frame
     const animate = (timestamp: number) => {
@@ -577,8 +597,8 @@ const Index = () => {
       }
 
       // === LAYER 2: CONDENSATION FOG ===
-      if (s.fogDensity > 0) {
-        if (timestamp - fogLastUpdateRef.current > 120) {
+      if (s.fogDensity > 0 && PERF.enableFog) {
+        if (timestamp - fogLastUpdateRef.current > PERF.fogUpdateInterval) {
           updateFogLayer(width, height, timestamp, s.fogDensity);
           fogLastUpdateRef.current = timestamp;
         }
@@ -685,8 +705,8 @@ const Index = () => {
             const newSplashes = createSplashParticles(drop.x, drop.y, drop.mass);
             splashParticlesRef.current.push(...newSplashes);
             // Cap total splash particles
-            if (splashParticlesRef.current.length > 200) {
-              splashParticlesRef.current.splice(0, splashParticlesRef.current.length - 200);
+            if (splashParticlesRef.current.length > PERF.maxSplash) {
+              splashParticlesRef.current.splice(0, splashParticlesRef.current.length - PERF.maxSplash);
             }
           }
         }
@@ -719,7 +739,7 @@ const Index = () => {
       }
 
       // Second pass: draw water film connections between moving drops and trail beads
-      for (let i = 0; i < droplets.length; i++) {
+      if (PERF.enableWaterFilm) for (let i = 0; i < droplets.length; i++) {
         const drop = droplets[i];
         if (drop.opacity <= 0 || drop.isStuck) continue;
         const speed = Math.sqrt(drop.vx * drop.vx + drop.vy * drop.vy);
@@ -805,7 +825,7 @@ const Index = () => {
 
           // Barrel distortion approximation: draw multiple concentric rings
           // at slightly increasing magnification. Center is more magnified.
-          if (drop.baseRadius > 10) {
+          if (PERF.enableBarrelDistortion && drop.baseRadius > 10) {
             // 3-ring barrel distortion for large drops
             const rings = 3;
             for (let ring = rings - 1; ring >= 0; ring--) {
@@ -868,7 +888,7 @@ const Index = () => {
           }
 
           // Chromatic aberration: offset red/blue channels slightly
-          if (drop.baseRadius > 7) {
+          if (PERF.enableChromaticAberration && drop.baseRadius > 7) {
             const caOffset = Math.min(2, drop.baseRadius * 0.08);
             const srcW = rx * 2 * baseScale;
             const srcH = ry * 2 * baseScale;
@@ -945,7 +965,7 @@ const Index = () => {
 
         // 4. INTERNAL COLOR CAUSTICS from nearby bokeh lights
         // Check if any bokeh orb is "behind" this drop and tint the drop interior
-        if (drop.baseRadius > 6) {
+        if (PERF.enableBokehCaustics && drop.baseRadius > 6) {
           const orbs = bokehOrbsRef.current;
           for (let b = 0; b < orbs.length; b++) {
             const orb = orbs[b];
@@ -1103,8 +1123,8 @@ const Index = () => {
         ctx.restore();
       }
       // Cap total streaks
-      if (wetStreaksRef.current.length > 80) {
-        wetStreaksRef.current.splice(0, wetStreaksRef.current.length - 80);
+      if (wetStreaksRef.current.length > PERF.maxStreaks) {
+        wetStreaksRef.current.splice(0, wetStreaksRef.current.length - PERF.maxStreaks);
       }
 
       // === LAYER 6.6: SPLASH MICRO-DROPLETS ===
@@ -1199,7 +1219,7 @@ const Index = () => {
       ctx.fillRect(0, 0, width, height);
 
       // Film grain
-      if (grainCanvasRef.current) {
+      if (PERF.enableGrain && grainCanvasRef.current) {
         ctx.save();
         ctx.globalAlpha = 0.06;
         ctx.globalCompositeOperation = 'overlay';
@@ -1320,7 +1340,7 @@ const Index = () => {
     simulationRef.current.populate(settings);
     const canvas = canvasRef.current;
     if (canvas) {
-      bgRainRef.current = createBackgroundRainStreaks(canvas.width, canvas.height, 180);
+      bgRainRef.current = createBackgroundRainStreaks(canvas.width, canvas.height, PERF.bgRainCount);
       buildBackgroundLayer(canvas.width, canvas.height, settings);
     }
   };
@@ -1329,11 +1349,11 @@ const Index = () => {
   // RENDER
   // ============================================================================
   return (
-    <div className="w-screen h-screen overflow-hidden bg-black" onClick={startAudio}>
+    <div className="w-screen h-screen overflow-hidden bg-black" style={{ touchAction: 'none' }} onClick={startAudio}>
       <canvas
         ref={canvasRef}
         className="absolute inset-0 w-full h-full"
-        style={{ imageRendering: 'auto' }}
+        style={{ imageRendering: 'auto', touchAction: 'none' }}
       />
 
       {/* Settings Panel */}
@@ -1343,13 +1363,14 @@ const Index = () => {
             variant="outline"
             size="icon"
             className="fixed bottom-5 left-5 z-50 rounded-full h-14 w-14 bg-black/40 backdrop-blur-xl border-white/20 hover:bg-black/60 shadow-2xl"
+            style={{ bottom: 'max(1.25rem, env(safe-area-inset-bottom, 0px))', left: 'max(1.25rem, env(safe-area-inset-left, 0px))' }}
           >
             <Settings className="h-6 w-6 text-white" />
           </Button>
         </SheetTrigger>
         <SheetContent
           side="left"
-          className="w-[350px] bg-black/80 backdrop-blur-2xl border-white/10 overflow-y-auto"
+          className="w-full max-w-[350px] bg-black/80 backdrop-blur-2xl border-white/10 overflow-y-auto"
         >
           <SheetHeader>
             <SheetTitle className="text-white flex items-center gap-2">

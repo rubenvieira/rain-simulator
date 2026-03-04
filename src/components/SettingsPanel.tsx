@@ -40,7 +40,7 @@ export function SettingsPanel({
       </SheetTrigger>
       <SheetContent
         side="left"
-        className="w-[350px] bg-black/80 backdrop-blur-2xl border-white/10 overflow-y-auto"
+        className="w-full max-w-[350px] bg-black/80 backdrop-blur-2xl border-white/10 overflow-y-auto"
       >
         <SheetHeader>
           <SheetTitle className="text-white flex items-center gap-2">
