@@ -17,7 +17,6 @@ export interface RainSettings {
     windSpeed: number;        // 0-100: wind force
     windAngle: number;        // -45 to 45: wind direction in degrees
     trailPersistence: number; // 0-100: how long trails last
-    glassWetness: number;     // 0-100: existing wetness on glass
     gravity: number;          // 1-10: gravity multiplier
     surfaceTension: number;   // 1-10: how much droplets stick
     thunder: boolean;
@@ -352,6 +351,10 @@ export class Droplet {
         const windForceX = Math.sin(windRad) * windStrength * 0.02;
         const windForceY = Math.cos(windRad) * windStrength * 0.005;
 
+        // Recalculate surface tension from current settings (reactive to slider)
+        this.stickForce = 0.3 + (settings.surfaceTension / 10) * 0.7;
+        this.stickThreshold = this.stickForce * (1 + 1 / (this.mass * 0.2 + 1));
+
         // Surface tension resistance
         const totalVelocity = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
         const resistanceForce = this.stickForce * 0.1 / (this.mass * 0.1 + 1);
@@ -505,6 +508,7 @@ export class RainSimulation {
     private time: number = 0;
     private canvasWidth: number = 0;
     private canvasHeight: number = 0;
+    private currentSettings: RainSettings | null = null;
     maxDroplets: number = 500;
     rivuletMap: RivuletMap;
     enableRivuletAttraction: boolean;
@@ -550,10 +554,12 @@ export class RainSimulation {
     }
 
     private createTrailBead = (x: number, y: number, radius: number) => {
-        this.trailBeads.push(new TrailBead(x, y, radius, 50));
+        const persistence = this.currentSettings?.trailPersistence ?? 50;
+        this.trailBeads.push(new TrailBead(x, y, radius, persistence));
     };
 
     update(deltaTime: number, settings: RainSettings): void {
+        this.currentSettings = settings;
         this.time += deltaTime * 0.001;
 
         // Rain intensity gusts — natural ebb-and-flow
@@ -648,6 +654,17 @@ export class RainSimulation {
                     break;
                 }
             }
+        }
+
+        // Gradually adjust existing drop sizes when dropletSize setting changes
+        const targetMassBase = 5 + settings.dropletSize * 2;
+        for (let i = 0; i < this.droplets.length; i++) {
+            const drop = this.droplets[i];
+            // Scale target proportionally to each drop's relative size
+            const ratio = drop.mass / (targetMassBase * 3); // normalize
+            const targetMass = targetMassBase + targetMassBase * Math.min(4, ratio);
+            drop.mass += (targetMass - drop.mass) * 0.01 * (deltaTime / 16.67);
+            drop.baseRadius = Math.pow(drop.mass, 0.4) * 2.5;
         }
     }
 

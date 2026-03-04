@@ -99,7 +99,6 @@ const DEFAULT_SETTINGS: RainSettings = {
   windSpeed: 15,
   windAngle: 10,
   trailPersistence: 50,
-  glassWetness: 50,
   gravity: 5,
   surfaceTension: 5,
   thunder: true,
@@ -386,6 +385,7 @@ const Index = () => {
   const condensationRef = useRef<CondensationDrop[]>([]);
   const condensationCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const condensationLastUpdateRef = useRef(0);
+  const prevCondensationRef = useRef(DEFAULT_SETTINGS.condensation);
 
   // Bloom offscreen canvas (1/4 res)
   const bloomCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -757,6 +757,12 @@ const Index = () => {
       try {
       if ((s.condensation ?? 60) > 0) {
         const now = timestamp;
+        // Force immediate regen when slider changes
+        const curCondensation = s.condensation ?? 60;
+        if (curCondensation !== prevCondensationRef.current) {
+          prevCondensationRef.current = curCondensation;
+          condensationLastUpdateRef.current = 0;
+        }
         if (now - condensationLastUpdateRef.current > PERF.condensationUpdateInterval || !condensationCanvasRef.current) {
           condensationLastUpdateRef.current = now;
           const count = Math.floor(PERF.maxCondensation * ((s.condensation ?? 60) / 100));
@@ -1733,6 +1739,19 @@ const Index = () => {
                 min={1} max={10}
                 value={[settings.surfaceTension]}
                 onValueChange={([v]) => setSettings(s => ({ ...s, surfaceTension: v }))}
+              />
+            </div>
+
+            {/* Trail Persistence */}
+            <div className="grid gap-3">
+              <div className="flex justify-between">
+                <Label className="text-white/80">Trail Persistence</Label>
+                <span className="text-white/50 text-sm">{settings.trailPersistence}%</span>
+              </div>
+              <Slider
+                min={0} max={100}
+                value={[settings.trailPersistence]}
+                onValueChange={([v]) => setSettings(s => ({ ...s, trailPersistence: v }))}
               />
             </div>
 
