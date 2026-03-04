@@ -13,13 +13,16 @@ export interface RainSettings {
     intensity: number;        // 0-100: controls spawn rate
     dropletSize: number;      // 1-10: base size multiplier
     windSpeed: number;        // 0-100: wind force
-    windAngle: number;        // 0-360: wind direction in degrees
+    windAngle: number;        // -45 to 45: wind direction in degrees
     trailPersistence: number; // 0-100: how long trails last
     glassWetness: number;     // 0-100: existing wetness on glass
     gravity: number;          // 1-10: gravity multiplier
     surfaceTension: number;   // 1-10: how much droplets stick
     thunder: boolean;
     thunderFrequency: number;
+    bokehIntensity: number;   // 0-100: bokeh light density/brightness
+    fogDensity: number;       // 0-100: condensation fog amount
+    glassBlur: number;        // 0-100: background blur amount
 }
 
 export interface Vec2 {
@@ -28,7 +31,7 @@ export interface Vec2 {
 }
 
 // Perlin noise for realistic wind gusts
-class SimplexNoise {
+export class SimplexNoise {
     private grad3 = [
         [1, 1, 0], [-1, 1, 0], [1, -1, 0], [-1, -1, 0],
         [1, 0, 1], [-1, 0, 1], [1, 0, -1], [-1, 0, -1],
