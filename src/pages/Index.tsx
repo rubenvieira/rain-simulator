@@ -118,6 +118,9 @@ const PERF = {
   enableWaterFilm: !IS_LOW_PERF,
   enableGrain: !IS_LOW_PERF,
   fogUpdateInterval: IS_LOW_PERF ? 500 : 120,
+  bgScale: IS_LOW_PERF ? 0.5 : 1, // render background at half res on mobile
+  bgBlurMax: IS_LOW_PERF ? 4 : 14, // limit blur radius on mobile
+  enableFinalBlur: !IS_LOW_PERF,   // skip second blur pass on mobile
 };
 
 // ============================================================================
@@ -356,28 +359,42 @@ const Index = () => {
   // BACKGROUND LAYER (blurred image + bokeh)
   // ============================================================================
   const buildBackgroundLayer = useCallback((width: number, height: number, s: RainSettings) => {
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d')!;
+    // On mobile, render at reduced resolution to avoid GPU memory exhaustion
+    const scale = PERF.bgScale;
+    const bw = Math.floor(width * scale);
+    const bh = Math.floor(height * scale);
 
-    const blurAmount = Math.floor(4 + (s.glassBlur / 100) * 14);
+    // Reuse existing canvas or create new one
+    if (!bgLayerRef.current || bgLayerRef.current.width !== width || bgLayerRef.current.height !== height) {
+      const c = document.createElement('canvas');
+      c.width = width;
+      c.height = height;
+      bgLayerRef.current = c;
+    }
+
+    // Work canvas at (possibly reduced) resolution
+    const workCanvas = document.createElement('canvas');
+    workCanvas.width = bw;
+    workCanvas.height = bh;
+    const ctx = workCanvas.getContext('2d')!;
+
+    const blurAmount = Math.floor(4 + (s.glassBlur / 100) * PERF.bgBlurMax);
 
     // Draw background image if loaded
     if (bgLoadedRef.current) {
       const img = bgLoadedRef.current;
       const imgRatio = img.width / img.height;
-      const canvasRatio = width / height;
+      const canvasRatio = bw / bh;
       let drawWidth: number, drawHeight: number, offsetX: number, offsetY: number;
       if (canvasRatio > imgRatio) {
-        drawWidth = width;
-        drawHeight = width / imgRatio;
+        drawWidth = bw;
+        drawHeight = bw / imgRatio;
         offsetX = 0;
-        offsetY = (height - drawHeight) / 2;
+        offsetY = (bh - drawHeight) / 2;
       } else {
-        drawHeight = height;
-        drawWidth = height * imgRatio;
-        offsetX = (width - drawWidth) / 2;
+        drawHeight = bh;
+        drawWidth = bh * imgRatio;
+        offsetX = (bw - drawWidth) / 2;
         offsetY = 0;
       }
       ctx.filter = `blur(${blurAmount}px) brightness(0.7)`;
@@ -385,25 +402,26 @@ const Index = () => {
       ctx.filter = 'none';
     } else {
       // Fallback: procedural dark city gradient
-      const grad = ctx.createLinearGradient(0, 0, 0, height);
+      const grad = ctx.createLinearGradient(0, 0, 0, bh);
       grad.addColorStop(0, '#050510');
       grad.addColorStop(0.35, '#0a0a1a');
       grad.addColorStop(0.6, '#121225');
       grad.addColorStop(1, '#181830');
       ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, width, height);
+      ctx.fillRect(0, 0, bw, bh);
     }
 
     // Darken slightly for depth
     ctx.fillStyle = 'rgba(0, 5, 15, 0.25)';
-    ctx.fillRect(0, 0, width, height);
+    ctx.fillRect(0, 0, bw, bh);
 
-    // Render bokeh orbs with additive blending
+    // Render bokeh orbs with additive blending (at full resolution coords, scaled down)
     const orbs = generateBokehField(width, height, s.bokehIntensity);
     bokehOrbsRef.current = orbs;
 
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
+    if (scale < 1) ctx.scale(scale, scale);
     for (const orb of orbs) {
       const grad = ctx.createRadialGradient(orb.x, orb.y, 0, orb.x, orb.y, orb.radius);
       grad.addColorStop(0, `hsla(${orb.hue}, ${orb.sat}%, ${orb.lightness}%, ${orb.opacity})`);
@@ -412,7 +430,6 @@ const Index = () => {
       grad.addColorStop(1, 'rgba(0,0,0,0)');
 
       ctx.beginPath();
-      // Streaked bokeh (vertical elongation simulating glass refraction)
       ctx.save();
       ctx.translate(orb.x, orb.y);
       ctx.scale(1, orb.streakFactor);
@@ -436,16 +453,17 @@ const Index = () => {
     }
     ctx.restore();
 
-    // Apply final slight blur for softness
-    const finalCanvas = document.createElement('canvas');
-    finalCanvas.width = width;
-    finalCanvas.height = height;
-    const fCtx = finalCanvas.getContext('2d')!;
-    fCtx.filter = 'blur(2px)';
-    fCtx.drawImage(canvas, 0, 0);
-    fCtx.filter = 'none';
+    // Scale up to full resolution (skip expensive final blur on mobile)
+    const outCtx = bgLayerRef.current!.getContext('2d')!;
+    if (PERF.enableFinalBlur) {
+      outCtx.filter = 'blur(2px)';
+    }
+    outCtx.drawImage(workCanvas, 0, 0, width, height);
+    outCtx.filter = 'none';
 
-    bgLayerRef.current = finalCanvas;
+    // Release work canvas memory
+    workCanvas.width = 0;
+    workCanvas.height = 0;
   }, []);
 
   // ============================================================================
@@ -514,7 +532,8 @@ const Index = () => {
       img.src = `${import.meta.env.BASE_URL}rainy-city-bg.png`;
     };
 
-    const resize = () => {
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const resizeImmediate = () => {
       width = window.innerWidth;
       height = window.innerHeight;
       canvas.width = width;
@@ -523,9 +542,26 @@ const Index = () => {
       buildBackgroundLayer(width, height, settingsRef.current);
       bgRainRef.current = createBackgroundRainStreaks(width, height, PERF.bgRainCount);
     };
+    const resize = () => {
+      // Debounce on mobile to avoid repeated expensive rebuilds (address bar changes)
+      if (IS_LOW_PERF) {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+        sim.resize(width, height);
+        if (resizeTimer) clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+          buildBackgroundLayer(width, height, settingsRef.current);
+          bgRainRef.current = createBackgroundRainStreaks(width, height, PERF.bgRainCount);
+        }, 300);
+      } else {
+        resizeImmediate();
+      }
+    };
 
     initGrain();
-    resize();
+    resizeImmediate();
     loadBg();
     window.addEventListener('resize', resize);
 
@@ -536,11 +572,15 @@ const Index = () => {
 
     // Animation frame
     const animate = (timestamp: number) => {
-      const deltaTime = lastTimeRef.current ? (timestamp - lastTimeRef.current) : 16.67;
+      animationRef.current = requestAnimationFrame(animate);
+
+      const deltaTime = lastTimeRef.current ? Math.min(timestamp - lastTimeRef.current, 100) : 16.67;
       lastTimeRef.current = timestamp;
       timeRef.current = timestamp;
       const dt = deltaTime / 16.67;
       const s = settingsRef.current;
+
+      try {
 
       // === LAYER 1: BLURRED BACKGROUND + BOKEH ===
       if (bgLayerRef.current) {
@@ -1241,8 +1281,10 @@ const Index = () => {
       ctx.fillRect(0, 0, width, height);
       ctx.restore();
 
-      // Continue animation
-      animationRef.current = requestAnimationFrame(animate);
+      } catch (e) {
+        // Prevent render errors from killing the animation loop
+        console.warn('Rain render error:', e);
+      }
     };
 
     animationRef.current = requestAnimationFrame(animate);
@@ -1250,6 +1292,7 @@ const Index = () => {
     return () => {
       cancelAnimationFrame(animationRef.current);
       window.removeEventListener('resize', resize);
+      if (resizeTimer) clearTimeout(resizeTimer);
     };
   }, [buildBackgroundLayer, updateFogLayer, initGrain]);
 
