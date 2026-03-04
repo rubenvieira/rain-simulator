@@ -54,6 +54,26 @@ interface BackgroundRainStreak {
   thickness: number;
 }
 
+// Splash micro-droplet spawned on merge events
+interface SplashParticle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  radius: number;
+  opacity: number;
+  life: number;
+  maxLife: number;
+}
+
+// Wet streak left on glass by sliding drops
+interface WetStreak {
+  points: { x: number; y: number; width: number }[];
+  opacity: number;
+  age: number;
+  maxAge: number;
+}
+
 // Shape perturbations for organic drop outlines
 interface DropShape {
   perturbations: number[];  // base shape
@@ -224,6 +244,25 @@ function createBackgroundRainStreaks(
   return streaks;
 }
 
+function createSplashParticles(x: number, y: number, mass: number): SplashParticle[] {
+  const count = Math.floor(3 + (mass / 30) * 5);
+  const particles: SplashParticle[] = [];
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 0.5 + Math.random() * 2.5;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 1.5,
+      radius: 0.5 + Math.random() * 1.5,
+      opacity: 0.6 + Math.random() * 0.4,
+      life: 0,
+      maxLife: 300 + Math.random() * 400,
+    });
+  }
+  return particles;
+}
+
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
@@ -255,6 +294,17 @@ const Index = () => {
   // Fog canvas (updated at low frequency)
   const fogCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const fogLastUpdateRef = useRef(0);
+
+  // Splash particles from merge events
+  const splashParticlesRef = useRef<SplashParticle[]>([]);
+
+  // Wet streaks left by sliding drops
+  const wetStreaksRef = useRef<WetStreak[]>([]);
+  const lastDropPositionsRef = useRef<Map<Droplet, { x: number; y: number }>>(new Map());
+
+  // Puddle state at bottom of screen
+  const puddleHeightRef = useRef(0);
+  const puddleWavesRef = useRef<{ x: number; amp: number; freq: number; phase: number }[]>([]);
 
   // Settings ref for animation loop access
   const settingsRef = useRef(settings);
@@ -480,6 +530,42 @@ const Index = () => {
         ctx.fillRect(0, 0, width, height);
       }
 
+      // Animate bokeh orbs (pulse + drift)
+      const orbs = bokehOrbsRef.current;
+      for (let i = 0; i < orbs.length; i++) {
+        const orb = orbs[i];
+        orb.x += orb.driftX * dt;
+        orb.y += orb.driftY * dt;
+        orb.pulsePhase += orb.pulseSpeed * 0.016 * dt;
+        // Wrap around
+        if (orb.x < -orb.radius) orb.x = width + orb.radius;
+        if (orb.x > width + orb.radius) orb.x = -orb.radius;
+      }
+
+      // Draw animated bokeh on top of static background
+      if (orbs.length > 0) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (const orb of orbs) {
+          const pulse = 1 + Math.sin(orb.pulsePhase) * 0.12;
+          const r = orb.radius * pulse;
+          const alpha = orb.opacity * (0.85 + Math.sin(orb.pulsePhase * 0.7) * 0.15);
+          const grad = ctx.createRadialGradient(orb.x, orb.y, 0, orb.x, orb.y, r);
+          grad.addColorStop(0, `hsla(${orb.hue}, ${orb.sat}%, ${orb.lightness}%, ${alpha * 0.5})`);
+          grad.addColorStop(0.6, `hsla(${orb.hue}, ${orb.sat}%, ${orb.lightness}%, ${alpha * 0.12})`);
+          grad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.beginPath();
+          ctx.save();
+          ctx.translate(orb.x, orb.y);
+          ctx.scale(1, orb.streakFactor);
+          ctx.arc(0, 0, r, 0, Math.PI * 2);
+          ctx.restore();
+          ctx.fillStyle = grad;
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
       // Lightning flash brightens the background
       const flash = lightningRef.current;
       if (flash > 0) {
@@ -517,7 +603,8 @@ const Index = () => {
           streak.x = Math.random() * width * 1.2 - width * 0.1;
         }
 
-        const endX = streak.x - windX * streak.length * 0.04;
+        const windAngleRad = s.windAngle * Math.PI / 180;
+        const endX = streak.x - Math.sin(windAngleRad) * streak.length * 0.5;
         const endY = streak.y - streak.length;
 
         const grad = ctx.createLinearGradient(endX, endY, streak.x, streak.y);
@@ -586,6 +673,23 @@ const Index = () => {
         ctx.lineWidth = 0.5;
         ctx.arc(trail.x, trail.y, tr, 0, Math.PI * 2);
         ctx.stroke();
+      }
+
+      // === LAYER 5.5: DETECT MERGES AND SPAWN SPLASHES ===
+      for (let i = 0; i < droplets.length; i++) {
+        const drop = droplets[i];
+        // stretchY > 1.25 indicates a very recent merge event
+        if (drop.stretchY > 1.25 && drop.mass > 15) {
+          // Only spawn once per merge (stretchY decays quickly)
+          if (drop.stretchY > 1.28) {
+            const newSplashes = createSplashParticles(drop.x, drop.y, drop.mass);
+            splashParticlesRef.current.push(...newSplashes);
+            // Cap total splash particles
+            if (splashParticlesRef.current.length > 200) {
+              splashParticlesRef.current.splice(0, splashParticlesRef.current.length - 200);
+            }
+          }
+        }
       }
 
       // === LAYER 6: WATER DROPS ON GLASS (HERO ELEMENT) ===
@@ -936,6 +1040,150 @@ const Index = () => {
         ctx.restore();
       }
 
+      // === LAYER 6.5: WET STREAKS on glass ===
+      // Track moving drops and create wet streaks
+      const lastPos = lastDropPositionsRef.current;
+      for (let i = 0; i < droplets.length; i++) {
+        const drop = droplets[i];
+        const speed = Math.sqrt(drop.vx * drop.vx + drop.vy * drop.vy);
+        if (speed > 0.4 && !drop.isStuck && drop.mass > 10) {
+          const prev = lastPos.get(drop);
+          if (prev) {
+            const dx = drop.x - prev.x;
+            const dy = drop.y - prev.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist > 3) {
+              // Find or create streak for this drop
+              let streak = wetStreaksRef.current.find(s =>
+                s.points.length > 0 &&
+                Math.abs(s.points[s.points.length - 1].x - prev.x) < drop.baseRadius * 2 &&
+                Math.abs(s.points[s.points.length - 1].y - prev.y) < drop.baseRadius * 2
+              );
+              if (!streak) {
+                streak = { points: [], opacity: 0.25, age: 0, maxAge: 8000 };
+                wetStreaksRef.current.push(streak);
+              }
+              streak.points.push({ x: drop.x, y: drop.y, width: drop.baseRadius * 0.3 });
+              streak.age = 0; // Reset age while drop is still moving over it
+              // Limit streak length
+              if (streak.points.length > 60) streak.points.shift();
+            }
+          }
+          lastPos.set(drop, { x: drop.x, y: drop.y });
+        }
+      }
+
+      // Update and render wet streaks
+      for (let i = wetStreaksRef.current.length - 1; i >= 0; i--) {
+        const streak = wetStreaksRef.current[i];
+        streak.age += deltaTime;
+        streak.opacity = Math.max(0, 0.2 * (1 - streak.age / streak.maxAge));
+        if (streak.opacity <= 0 || streak.points.length < 2) {
+          wetStreaksRef.current.splice(i, 1);
+          continue;
+        }
+
+        ctx.save();
+        ctx.globalAlpha = streak.opacity;
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.beginPath();
+        ctx.moveTo(streak.points[0].x, streak.points[0].y);
+        for (let p = 1; p < streak.points.length; p++) {
+          const pt = streak.points[p];
+          const prev = streak.points[p - 1];
+          const mx = (pt.x + prev.x) / 2;
+          const my = (pt.y + prev.y) / 2;
+          ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
+        }
+        ctx.strokeStyle = 'rgba(140, 170, 210, 0.3)';
+        ctx.lineWidth = streak.points[0].width;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+        ctx.restore();
+      }
+      // Cap total streaks
+      if (wetStreaksRef.current.length > 80) {
+        wetStreaksRef.current.splice(0, wetStreaksRef.current.length - 80);
+      }
+
+      // === LAYER 6.6: SPLASH MICRO-DROPLETS ===
+      // Detect merges: check if droplet count decreased since last frame
+      // We spawn splashes from the simulation's merge events by tracking mass changes
+      const splashes = splashParticlesRef.current;
+      for (let i = splashes.length - 1; i >= 0; i--) {
+        const p = splashes[i];
+        p.life += deltaTime;
+        if (p.life > p.maxLife) {
+          splashes.splice(i, 1);
+          continue;
+        }
+        p.vy += 0.05 * dt; // Mini gravity
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.opacity = Math.max(0, 1 - p.life / p.maxLife);
+
+        // Render as tiny bright dot
+        ctx.save();
+        ctx.globalAlpha = p.opacity * 0.7;
+        const sg = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.radius);
+        sg.addColorStop(0, 'rgba(220, 235, 255, 0.9)');
+        sg.addColorStop(0.5, 'rgba(180, 200, 230, 0.3)');
+        sg.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+        ctx.fillStyle = sg;
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // === LAYER 6.7: PUDDLE AT BOTTOM ===
+      // Grow puddle based on drops reaching the bottom
+      const targetPuddleH = Math.min(height * 0.06, (s.intensity / 100) * height * 0.05 + 2);
+      puddleHeightRef.current += (targetPuddleH - puddleHeightRef.current) * 0.002 * dt;
+      const puddleH = puddleHeightRef.current;
+
+      if (puddleH > 1) {
+        const puddleY = height - puddleH;
+
+        // Initialize puddle waves if needed
+        if (puddleWavesRef.current.length === 0) {
+          for (let i = 0; i < 5; i++) {
+            puddleWavesRef.current.push({
+              x: Math.random() * width,
+              amp: 1 + Math.random() * 2,
+              freq: 0.02 + Math.random() * 0.03,
+              phase: Math.random() * Math.PI * 2,
+            });
+          }
+        }
+
+        // Puddle gradient
+        const puddleGrad = ctx.createLinearGradient(0, puddleY - 5, 0, height);
+        puddleGrad.addColorStop(0, 'rgba(10, 15, 30, 0)');
+        puddleGrad.addColorStop(0.15, 'rgba(15, 25, 45, 0.3)');
+        puddleGrad.addColorStop(0.5, 'rgba(20, 35, 60, 0.5)');
+        puddleGrad.addColorStop(1, 'rgba(10, 20, 40, 0.65)');
+        ctx.fillStyle = puddleGrad;
+        ctx.fillRect(0, puddleY - 5, width, puddleH + 5);
+
+        // Reflective shimmer on puddle surface
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const waves = puddleWavesRef.current;
+        for (const wave of waves) {
+          wave.phase += 0.02 * dt;
+          const waveY = puddleY + Math.sin(wave.phase) * wave.amp;
+          const waveGrad = ctx.createLinearGradient(0, waveY - 1, 0, waveY + 3);
+          waveGrad.addColorStop(0, 'rgba(100, 140, 200, 0)');
+          waveGrad.addColorStop(0.5, 'rgba(130, 170, 220, 0.06)');
+          waveGrad.addColorStop(1, 'rgba(100, 140, 200, 0)');
+          ctx.fillStyle = waveGrad;
+          ctx.fillRect(0, waveY - 1, width, 4);
+        }
+        ctx.restore();
+      }
+
       // === LAYER 7: POST-PROCESSING ===
 
       // Vignette (stronger, cinematic)
@@ -1044,8 +1292,20 @@ const Index = () => {
     }).connect(reverb);
     thunderSynth.volume.value = -10;
 
-    audioRef.current = { rainNoise, thunderSynth };
+    audioRef.current = { rainNoise, filter, thunderSynth };
   };
+
+  // Dynamic audio: link rain sound volume and filter to intensity/wind
+  useEffect(() => {
+    if (!audioRef.current?.rainNoise) return;
+    const { rainNoise, filter } = audioRef.current;
+    // Map intensity 5-100 to volume -35 to -18 dB
+    const targetVol = -35 + (settings.intensity / 100) * 17;
+    rainNoise.volume.rampTo(targetVol, 0.5);
+    // Wind increases filter cutoff for brighter rain sound
+    const cutoff = 500 + (settings.windSpeed / 100) * 800 + (settings.intensity / 100) * 400;
+    filter.frequency.rampTo(cutoff, 0.3);
+  }, [settings.intensity, settings.windSpeed]);
 
   // ============================================================================
   // REFRESH
@@ -1053,6 +1313,10 @@ const Index = () => {
   const handleRefresh = () => {
     simulationRef.current.reset();
     dropShapesRef.current.clear();
+    splashParticlesRef.current = [];
+    wetStreaksRef.current = [];
+    lastDropPositionsRef.current.clear();
+    puddleHeightRef.current = 0;
     simulationRef.current.populate(settings);
     const canvas = canvasRef.current;
     if (canvas) {
