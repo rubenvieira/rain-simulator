@@ -19,6 +19,7 @@ import {
 import {
   RainSimulation,
   SimplexNoise,
+  RivuletMap,
   Droplet,
   TrailBead,
 } from '@/simulation/RainSimulation';
@@ -84,6 +85,14 @@ interface DropShape {
   gravityBulge: number;     // 0-1: how pear-shaped the drop is (higher = more teardrop)
 }
 
+// Condensation micro-drop for humid glass effect
+interface CondensationDrop {
+  x: number;
+  y: number;
+  radius: number;
+  opacity: number;
+}
+
 const DEFAULT_SETTINGS: RainSettings = {
   intensity: 60,
   dropletSize: 5,
@@ -98,6 +107,8 @@ const DEFAULT_SETTINGS: RainSettings = {
   bokehIntensity: 70,
   fogDensity: 30,
   glassBlur: 60,
+  gustiness: 50,
+  condensation: 60,
 };
 
 // Mobile detection and performance tier
@@ -118,9 +129,17 @@ const PERF = {
   enableWaterFilm: !IS_LOW_PERF,
   enableGrain: !IS_LOW_PERF,
   fogUpdateInterval: IS_LOW_PERF ? 500 : 120,
-  bgScale: IS_LOW_PERF ? 0.5 : 1, // render background at half res on mobile
-  bgBlurMax: IS_LOW_PERF ? 4 : 14, // limit blur radius on mobile
-  enableFinalBlur: !IS_LOW_PERF,   // skip second blur pass on mobile
+  bgScale: IS_LOW_PERF ? 0.5 : 1,
+  bgBlurMax: IS_LOW_PERF ? 4 : 14,
+  enableFinalBlur: !IS_LOW_PERF,
+  // New realism features
+  maxCondensation: IS_LOW_PERF ? 200 : 800,
+  enableRivuletAttraction: !IS_LOW_PERF,
+  rivuletCellSize: IS_LOW_PERF ? 16 : 8,
+  enableDynamicSpecular: !IS_LOW_PERF,
+  enableBloom: !IS_LOW_PERF,
+  enableFresnel: !IS_LOW_PERF,
+  condensationUpdateInterval: IS_LOW_PERF ? 5000 : 2000,
 };
 
 // ============================================================================
@@ -254,25 +273,45 @@ function createBackgroundRainStreaks(
   const streaks: BackgroundRainStreak[] = [];
   for (let i = 0; i < count; i++) {
     const z = Math.random();
+    // Depth-layered rain: far (z<0.33), mid (0.33-0.66), near (z>0.66)
+    let length: number, speed: number, opacity: number, thickness: number;
+    if (z < 0.33) {
+      // Far plane: thin, faint, slow
+      length = 15 + z * 25;
+      speed = 8 + z * 12;
+      opacity = 0.02 + z * 0.06;
+      thickness = 0.2 + z * 0.5;
+    } else if (z < 0.66) {
+      // Mid plane: current settings
+      length = 20 + z * 40;
+      speed = 14 + z * 22;
+      opacity = 0.04 + z * 0.12;
+      thickness = 0.3 + z * 1.2;
+    } else {
+      // Near plane: thick, fast, bright
+      length = 30 + z * 60;
+      speed = 20 + z * 30;
+      opacity = 0.08 + z * 0.18;
+      thickness = 0.6 + z * 1.8;
+    }
     streaks.push({
       x: Math.random() * width * 1.2 - width * 0.1,
       y: -20 - Math.random() * height,
-      z,
-      length: 20 + z * 40,
-      speed: 14 + z * 22,
-      opacity: 0.04 + z * 0.12,
-      thickness: 0.3 + z * 1.2,
+      z, length, speed, opacity, thickness,
     });
   }
   return streaks;
 }
 
-function createSplashParticles(x: number, y: number, mass: number): SplashParticle[] {
-  const count = Math.floor(3 + (mass / 30) * 5);
+function createSplashParticles(x: number, y: number, mass: number, mergeAngle: number = 0, mergeEnergy: number = 1): SplashParticle[] {
+  const count = Math.floor(3 + mergeEnergy * 4);
   const particles: SplashParticle[] = [];
+  // Splash perpendicular to merge direction
+  const perpAngle = mergeAngle + Math.PI / 2;
   for (let i = 0; i < count; i++) {
-    const angle = Math.random() * Math.PI * 2;
-    const speed = 0.5 + Math.random() * 2.5;
+    const spread = (Math.random() - 0.5) * Math.PI * 0.8;
+    const angle = perpAngle + spread;
+    const speed = (0.5 + Math.random() * 2.5) * Math.min(2, mergeEnergy);
     particles.push({
       x, y,
       vx: Math.cos(angle) * speed,
@@ -284,6 +323,20 @@ function createSplashParticles(x: number, y: number, mass: number): SplashPartic
     });
   }
   return particles;
+}
+
+// Generate condensation micro-drops using Poisson-ish sampling
+function generateCondensation(width: number, height: number, count: number): CondensationDrop[] {
+  const drops: CondensationDrop[] = [];
+  for (let i = 0; i < count; i++) {
+    drops.push({
+      x: Math.random() * width,
+      y: Math.random() * height,
+      radius: 0.5 + Math.random() * 2.5,
+      opacity: 0.15 + Math.random() * 0.35,
+    });
+  }
+  return drops;
 }
 
 // ============================================================================
@@ -298,7 +351,7 @@ const Index = () => {
 
   // Refs for animation state
   const animationRef = useRef<number>(0);
-  const simulationRef = useRef<RainSimulation>(new RainSimulation(PERF.maxDroplets));
+  const simulationRef = useRef<RainSimulation>(new RainSimulation(PERF.maxDroplets, PERF.rivuletCellSize, PERF.enableRivuletAttraction));
   const noiseRef = useRef<SimplexNoise>(new SimplexNoise());
   const timeRef = useRef(0);
   const lastTimeRef = useRef(0);
@@ -328,6 +381,15 @@ const Index = () => {
   // Puddle state at bottom of screen
   const puddleHeightRef = useRef(0);
   const puddleWavesRef = useRef<{ x: number; amp: number; freq: number; phase: number }[]>([]);
+
+  // Condensation micro-drops
+  const condensationRef = useRef<CondensationDrop[]>([]);
+  const condensationCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const condensationLastUpdateRef = useRef(0);
+
+  // Bloom offscreen canvas (1/4 res)
+  const bloomCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const bloomFrameRef = useRef(0);
 
   // Settings ref for animation loop access
   const settingsRef = useRef(settings);
@@ -636,14 +698,85 @@ const Index = () => {
         ctx.restore();
       }
 
-      // === LAYER 2: CONDENSATION FOG ===
+      // === LAYER 2: CONDENSATION FOG (with breathing) ===
       if (s.fogDensity > 0 && PERF.enableFog) {
+        // Fog breathing: slow oscillation of effective density
+        const fogBreath = 1 + Math.sin(timestamp * 0.0002) * 0.15 + Math.sin(timestamp * 0.00007) * 0.1;
+        const effectiveFogDensity = s.fogDensity * fogBreath;
         if (timestamp - fogLastUpdateRef.current > PERF.fogUpdateInterval) {
-          updateFogLayer(width, height, timestamp, s.fogDensity);
+          updateFogLayer(width, height, timestamp, effectiveFogDensity);
           fogLastUpdateRef.current = timestamp;
         }
         if (fogCanvasRef.current) {
           ctx.drawImage(fogCanvasRef.current, 0, 0, width, height);
+        }
+      }
+
+      // === LAYER 2.5: RIVULET CHANNELS ===
+      // Render subtle wet paths where drops have traveled
+      const rivMap = sim.rivuletMap;
+      const rivData = rivMap.getData();
+      const rivCols = rivMap.cols;
+      const rivRows = rivMap.rows;
+      const rivCell = rivMap.cellSize;
+      ctx.save();
+      for (let r = 0; r < rivRows; r++) {
+        for (let c = 0; c < rivCols; c++) {
+          const strength = rivData[r * rivCols + c];
+          if (strength > 0.05) {
+            ctx.fillStyle = `rgba(0, 5, 15, ${strength * 0.08})`;
+            ctx.fillRect(c * rivCell, r * rivCell, rivCell, rivCell);
+          }
+        }
+      }
+      ctx.restore();
+
+      // === LAYER 2.6: CONDENSATION MICRO-DROPS ===
+      if ((s.condensation ?? 60) > 0) {
+        const now = timestamp;
+        if (now - condensationLastUpdateRef.current > PERF.condensationUpdateInterval || !condensationCanvasRef.current) {
+          condensationLastUpdateRef.current = now;
+          const count = Math.floor(PERF.maxCondensation * ((s.condensation ?? 60) / 100));
+          const drops = generateCondensation(width, height, count);
+
+          // Remove condensation near main droplets (absorption wake)
+          const mainDroplets = sim.getDroplets();
+          const filteredDrops = drops.filter(cd => {
+            for (let d = 0; d < mainDroplets.length; d++) {
+              const md = mainDroplets[d];
+              const ddx = cd.x - md.x;
+              const ddy = cd.y - md.y;
+              if (ddx * ddx + ddy * ddy < (md.baseRadius * 3) * (md.baseRadius * 3)) return false;
+            }
+            return true;
+          });
+          condensationRef.current = filteredDrops;
+
+          // Render to offscreen canvas
+          if (!condensationCanvasRef.current || condensationCanvasRef.current.width !== width) {
+            const cc = document.createElement('canvas');
+            cc.width = width;
+            cc.height = height;
+            condensationCanvasRef.current = cc;
+          }
+          const cCtx = condensationCanvasRef.current.getContext('2d')!;
+          cCtx.clearRect(0, 0, width, height);
+          for (const cd of filteredDrops) {
+            cCtx.beginPath();
+            cCtx.arc(cd.x, cd.y, cd.radius, 0, Math.PI * 2);
+            cCtx.fillStyle = `rgba(180, 200, 220, ${cd.opacity * 0.15})`;
+            cCtx.fill();
+            // Tiny specular dot
+            if (cd.radius > 1) {
+              cCtx.beginPath();
+              cCtx.arc(cd.x - cd.radius * 0.3, cd.y - cd.radius * 0.3, Math.max(0.5, cd.radius * 0.25), 0, Math.PI * 2);
+              cCtx.fillStyle = `rgba(255, 255, 255, ${cd.opacity * 0.4})`;
+              cCtx.fill();
+            }
+          }
+        }
+        if (condensationCanvasRef.current) {
+          ctx.drawImage(condensationCanvasRef.current, 0, 0);
         }
       }
 
@@ -655,8 +788,15 @@ const Index = () => {
       const streaks = bgRainRef.current;
       for (let i = 0; i < streaks.length; i++) {
         const streak = streaks[i];
-        streak.x += windX * streak.z * dt;
+        // Far streaks: reduced wind response
+        const windResponse = streak.z < 0.33 ? 0.4 : (streak.z > 0.66 ? 1.3 : 1.0);
+        streak.x += windX * streak.z * windResponse * dt;
         streak.y += streak.speed * dt;
+
+        // Near streaks: slight horizontal turbulence
+        if (streak.z > 0.66) {
+          streak.x += Math.sin(timestamp * 0.003 + streak.y * 0.01) * 0.3 * dt;
+        }
 
         if (streak.y > height + 60) {
           streak.y = -streak.length - Math.random() * 100;
@@ -738,16 +878,13 @@ const Index = () => {
       // === LAYER 5.5: DETECT MERGES AND SPAWN SPLASHES ===
       for (let i = 0; i < droplets.length; i++) {
         const drop = droplets[i];
-        // stretchY > 1.25 indicates a very recent merge event
-        if (drop.stretchY > 1.25 && drop.mass > 15) {
-          // Only spawn once per merge (stretchY decays quickly)
-          if (drop.stretchY > 1.28) {
-            const newSplashes = createSplashParticles(drop.x, drop.y, drop.mass);
-            splashParticlesRef.current.push(...newSplashes);
-            // Cap total splash particles
-            if (splashParticlesRef.current.length > PERF.maxSplash) {
-              splashParticlesRef.current.splice(0, splashParticlesRef.current.length - PERF.maxSplash);
-            }
+        // Oscillation amplitude > 0.05 indicates a recent merge
+        if (drop.oscillationAmplitude > 0.05 && drop.mass > 15 && drop.lastMergeEnergy > 0.3) {
+          const newSplashes = createSplashParticles(drop.x, drop.y, drop.mass, drop.lastMergeAngle, drop.lastMergeEnergy);
+          splashParticlesRef.current.push(...newSplashes);
+          drop.lastMergeEnergy = 0; // Only splash once per merge
+          if (splashParticlesRef.current.length > PERF.maxSplash) {
+            splashParticlesRef.current.splice(0, splashParticlesRef.current.length - PERF.maxSplash);
           }
         }
       }
@@ -958,6 +1095,18 @@ const Index = () => {
             ctx.globalAlpha = drop.opacity;
           }
 
+          // Fresnel ring effect: bright rim, transparent center (desktop only)
+          if (PERF.enableFresnel && drop.baseRadius > 5) {
+            const fresnelGrad = ctx.createRadialGradient(dx, dy, 0, dx, dy, Math.max(rx, ry));
+            fresnelGrad.addColorStop(0, 'rgba(0, 0, 0, 0.08)');
+            fresnelGrad.addColorStop(0.7, 'rgba(180, 200, 230, 0.04)');
+            fresnelGrad.addColorStop(0.85, 'rgba(180, 200, 230, 0.08)');
+            fresnelGrad.addColorStop(1, 'rgba(200, 220, 255, 0.15)');
+            drawDropPath(ctx, dx, dy, rx, ry, shape, timestamp);
+            ctx.fillStyle = fresnelGrad;
+            ctx.fill();
+          }
+
           ctx.restore();
         }
 
@@ -1038,9 +1187,35 @@ const Index = () => {
           }
         }
 
-        // 5. PRIMARY SPECULAR HIGHLIGHT (top-left, sharp)
-        const hlX = dx - rx * 0.3;
-        const hlY = dy - ry * 0.33;
+        // 5. PRIMARY SPECULAR HIGHLIGHT (dynamic, responds to nearby bokeh)
+        let hlX = dx - rx * 0.3;
+        let hlY = dy - ry * 0.33;
+        if (PERF.enableDynamicSpecular && drop.baseRadius > 6) {
+          // Find nearest bright bokeh orb and shift highlight accordingly
+          let nearestDist = Infinity;
+          let nearestOrb: BokehOrb | null = null;
+          for (let b = 0; b < Math.min(orbs.length, 10); b++) {
+            const orb = orbs[b];
+            if (orb.opacity < 0.06) continue;
+            const bdx = orb.x - dx;
+            const bdy = orb.y - dy;
+            const bDist = Math.sqrt(bdx * bdx + bdy * bdy);
+            if (bDist < nearestDist) {
+              nearestDist = bDist;
+              nearestOrb = orb;
+            }
+          }
+          if (nearestOrb && nearestDist < 500) {
+            const lightDirX = nearestOrb.x - dx;
+            const lightDirY = nearestOrb.y - dy;
+            const norm = Math.sqrt(lightDirX * lightDirX + lightDirY * lightDirY) + 0.1;
+            hlX = dx - (lightDirX / norm) * rx * 0.35;
+            hlY = dy - (lightDirY / norm) * ry * 0.35;
+            // Motion offset for post-merge wobble
+            hlX -= drop.vx * rx * 0.15;
+            hlY -= drop.vy * ry * 0.1;
+          }
+        }
         const hlR = Math.min(rx, ry) * (drop.baseRadius > 8 ? 0.26 : 0.3);
         const hlGrad = ctx.createRadialGradient(hlX, hlY, 0, hlX, hlY, hlR);
         hlGrad.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
@@ -1246,6 +1421,45 @@ const Index = () => {
 
       // === LAYER 7: POST-PROCESSING ===
 
+      // Anamorphic bloom (desktop only, every other frame)
+      if (PERF.enableBloom) {
+        bloomFrameRef.current++;
+        if (bloomFrameRef.current % 2 === 0) {
+          const bw = Math.floor(width / 4);
+          const bh = Math.floor(height / 4);
+          if (!bloomCanvasRef.current || bloomCanvasRef.current.width !== bw) {
+            const bc = document.createElement('canvas');
+            bc.width = bw;
+            bc.height = bh;
+            bloomCanvasRef.current = bc;
+          }
+          const bCtx = bloomCanvasRef.current.getContext('2d')!;
+          bCtx.clearRect(0, 0, bw, bh);
+          // Draw bright specular positions as white dots
+          for (let i = 0; i < droplets.length; i++) {
+            const drop = droplets[i];
+            if (drop.baseRadius > 5 && drop.opacity > 0.5) {
+              const bx = (drop.x - drop.baseRadius * 0.3) / 4;
+              const by = (drop.y - drop.baseRadius * 0.33) / 4;
+              bCtx.beginPath();
+              bCtx.arc(bx, by, Math.max(1, drop.baseRadius * 0.06), 0, Math.PI * 2);
+              bCtx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+              bCtx.fill();
+            }
+          }
+          bCtx.filter = 'blur(8px)';
+          bCtx.drawImage(bloomCanvasRef.current, 0, 0);
+          bCtx.filter = 'none';
+        }
+        if (bloomCanvasRef.current) {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = 0.08;
+          ctx.drawImage(bloomCanvasRef.current, 0, 0, width, height);
+          ctx.restore();
+        }
+      }
+
       // Vignette (stronger, cinematic)
       const vignette = ctx.createRadialGradient(
         width / 2, height / 2, Math.min(width, height) * 0.25,
@@ -1274,10 +1488,15 @@ const Index = () => {
         ctx.restore();
       }
 
-      // Subtle cool-blue color grade
+      // Split-tone color grade (cool shadows + warm highlights)
       ctx.save();
       ctx.globalCompositeOperation = 'multiply';
-      ctx.fillStyle = 'rgba(210, 220, 240, 0.06)';
+      ctx.fillStyle = 'rgba(200, 210, 235, 0.08)';
+      ctx.fillRect(0, 0, width, height);
+      ctx.restore();
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.fillStyle = 'rgba(40, 30, 20, 0.04)';
       ctx.fillRect(0, 0, width, height);
       ctx.restore();
 
@@ -1380,6 +1599,10 @@ const Index = () => {
     wetStreaksRef.current = [];
     lastDropPositionsRef.current.clear();
     puddleHeightRef.current = 0;
+    condensationRef.current = [];
+    condensationCanvasRef.current = null;
+    condensationLastUpdateRef.current = 0;
+    bloomCanvasRef.current = null;
     simulationRef.current.populate(settings);
     const canvas = canvasRef.current;
     if (canvas) {
@@ -1541,6 +1764,30 @@ const Index = () => {
                 min={0} max={100}
                 value={[settings.fogDensity]}
                 onValueChange={([v]) => setSettings(s => ({ ...s, fogDensity: v }))}
+              />
+            </div>
+
+            <div className="grid gap-3">
+              <div className="flex justify-between">
+                <Label className="text-white/80">Glass Condensation</Label>
+                <span className="text-white/50 text-sm">{settings.condensation ?? 60}%</span>
+              </div>
+              <Slider
+                min={0} max={100}
+                value={[settings.condensation ?? 60]}
+                onValueChange={([v]) => setSettings(s => ({ ...s, condensation: v }))}
+              />
+            </div>
+
+            <div className="grid gap-3">
+              <div className="flex justify-between">
+                <Label className="text-white/80">Gustiness</Label>
+                <span className="text-white/50 text-sm">{settings.gustiness ?? 50}%</span>
+              </div>
+              <Slider
+                min={0} max={100}
+                value={[settings.gustiness ?? 50]}
+                onValueChange={([v]) => setSettings(s => ({ ...s, gustiness: v }))}
               />
             </div>
 

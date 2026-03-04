@@ -1,12 +1,14 @@
 /**
  * Realistic Rain Simulation Physics Engine
- * 
+ *
  * Simulates water droplets on a glass surface with:
  * - Surface tension and contact angle physics
- * - Mass-based deformation
- * - Wind simulation with gusts
- * - Trail system with "pearling" effect
- * - Realistic merging behavior
+ * - Energy-based surface tension (not binary stuck/unstick)
+ * - Mass-based deformation with damped oscillation on merge
+ * - Wind simulation with gusts and intensity variation
+ * - Trail system with gravity-affected "pearling" effect
+ * - Rivulet channel system (drops carve paths, future drops follow)
+ * - Realistic merging behavior with directional splash
  */
 
 export interface RainSettings {
@@ -23,6 +25,8 @@ export interface RainSettings {
     bokehIntensity: number;   // 0-100: bokeh light density/brightness
     fogDensity: number;       // 0-100: condensation fog amount
     glassBlur: number;        // 0-100: background blur amount
+    gustiness: number;        // 0-100: rain intensity variation
+    condensation: number;     // 0-100: micro-drop density
 }
 
 export interface Vec2 {
@@ -103,10 +107,105 @@ export class SimplexNoise {
     }
 }
 
+// Rivulet channel map — tracks where drops have traveled on the glass
+export class RivuletMap {
+    private data: Float32Array;      // wetness strength
+    private dirX: Float32Array;      // average flow direction X
+    private dirY: Float32Array;      // average flow direction Y
+    cols: number;
+    rows: number;
+    cellSize: number;
+
+    constructor(width: number, height: number, cellSize: number = 8) {
+        this.cellSize = cellSize;
+        this.cols = Math.ceil(width / cellSize);
+        this.rows = Math.ceil(height / cellSize);
+        const len = this.cols * this.rows;
+        this.data = new Float32Array(len);
+        this.dirX = new Float32Array(len);
+        this.dirY = new Float32Array(len);
+    }
+
+    resize(width: number, height: number) {
+        const newCols = Math.ceil(width / this.cellSize);
+        const newRows = Math.ceil(height / this.cellSize);
+        if (newCols !== this.cols || newRows !== this.rows) {
+            this.cols = newCols;
+            this.rows = newRows;
+            const len = newCols * newRows;
+            this.data = new Float32Array(len);
+            this.dirX = new Float32Array(len);
+            this.dirY = new Float32Array(len);
+        }
+    }
+
+    deposit(x: number, y: number, strength: number, flowDirX: number, flowDirY: number) {
+        const col = Math.floor(x / this.cellSize);
+        const row = Math.floor(y / this.cellSize);
+        if (col < 0 || col >= this.cols || row < 0 || row >= this.rows) return;
+        const idx = row * this.cols + col;
+        this.data[idx] = Math.min(1, this.data[idx] + strength);
+        // Blend flow direction
+        this.dirX[idx] = this.dirX[idx] * 0.8 + flowDirX * 0.2;
+        this.dirY[idx] = this.dirY[idx] * 0.8 + flowDirY * 0.2;
+    }
+
+    query(x: number, y: number, radius: number): { forceX: number; forceY: number; strength: number } {
+        const col = Math.floor(x / this.cellSize);
+        const row = Math.floor(y / this.cellSize);
+        const r = Math.ceil(radius / this.cellSize);
+        let totalForceX = 0;
+        let totalForceY = 0;
+        let totalStrength = 0;
+
+        for (let dy = -r; dy <= r; dy++) {
+            for (let dx = -r; dx <= r; dx++) {
+                const c = col + dx;
+                const rr = row + dy;
+                if (c < 0 || c >= this.cols || rr < 0 || rr >= this.rows) continue;
+                const idx = rr * this.cols + c;
+                const s = this.data[idx];
+                if (s < 0.01) continue;
+                // Distance-weighted attraction toward the channel
+                const wx = (c * this.cellSize + this.cellSize / 2) - x;
+                const wy = (rr * this.cellSize + this.cellSize / 2) - y;
+                const dist = Math.sqrt(wx * wx + wy * wy) + 0.1;
+                const weight = s / dist;
+                totalForceX += (wx / dist) * weight;
+                totalForceY += (wy / dist) * weight;
+                totalStrength += s;
+            }
+        }
+
+        return { forceX: totalForceX, forceY: totalForceY, strength: totalStrength };
+    }
+
+    // Get raw data for rendering
+    getData(): Float32Array {
+        return this.data;
+    }
+
+    decay(deltaTime: number) {
+        const factor = 1 - 0.0003 * deltaTime; // Slow evaporation
+        for (let i = 0; i < this.data.length; i++) {
+            this.data[i] *= factor;
+            if (this.data[i] < 0.005) this.data[i] = 0;
+        }
+    }
+
+    clear() {
+        this.data.fill(0);
+        this.dirX.fill(0);
+        this.dirY.fill(0);
+    }
+}
+
 // Trail bead left behind by moving droplets
 export class TrailBead {
     x: number;
     y: number;
+    vx: number;
+    vy: number;
     radius: number;
     opacity: number;
     age: number;
@@ -115,15 +214,37 @@ export class TrailBead {
     constructor(x: number, y: number, radius: number, persistence: number) {
         this.x = x;
         this.y = y;
+        this.vx = 0;
+        this.vy = 0;
         this.radius = radius;
         this.opacity = 0.6;
         this.age = 0;
         this.maxAge = 500 + persistence * 50; // 500ms to 5500ms
     }
 
-    update(deltaTime: number): boolean {
+    update(deltaTime: number, rivuletMap?: RivuletMap, enableAttraction?: boolean): boolean {
         this.age += deltaTime;
         this.opacity = Math.max(0, 0.6 * (1 - this.age / this.maxAge));
+        const dt = deltaTime / 16.67;
+
+        // Micro-gravity: trail beads slowly slide down
+        this.vy += 0.002 * dt;
+
+        // Rivulet attraction (desktop only)
+        if (enableAttraction && rivuletMap) {
+            const q = rivuletMap.query(this.x, this.y, 16);
+            if (q.strength > 0.1) {
+                this.vx += q.forceX * 0.0005 * dt;
+                this.vy += q.forceY * 0.0003 * dt;
+            }
+        }
+
+        // Apply velocity with damping
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this.vx *= 0.98;
+        this.vy *= 0.98;
+
         this.radius *= 0.9995; // Very slow shrinking
         return this.age < this.maxAge && this.radius > 0.5;
     }
@@ -142,10 +263,16 @@ export class Droplet {
     stretchX: number = 1;
     stretchY: number = 1;
 
-    // Surface interaction
+    // Damped oscillation from merges
+    oscillationAmplitude: number = 0;
+    oscillationPhase: number = 0;
+
+    // Energy-based surface tension
     isStuck: boolean;
     stickForce: number;
-    contactAngle: number; // Affects how droplet spreads on surface
+    stickEnergy: number = 0;
+    stickThreshold: number;
+    contactAngle: number;
 
     // Visual properties
     opacity: number = 0;
@@ -154,6 +281,10 @@ export class Droplet {
     lastTrailX: number;
     lastTrailY: number;
     distanceSinceTrail: number = 0;
+
+    // Merge tracking for directional splash
+    lastMergeAngle: number = 0;
+    lastMergeEnergy: number = 0;
 
     constructor(x: number, y: number, mass: number, settings: RainSettings) {
         this.x = x;
@@ -169,7 +300,8 @@ export class Droplet {
 
         // Surface tension determines how sticky droplet is
         this.stickForce = 0.3 + (settings.surfaceTension / 10) * 0.7;
-        this.contactAngle = 40 + Math.random() * 30; // Degrees, affects spread
+        this.stickThreshold = this.stickForce * (1 + 1 / (mass * 0.2 + 1));
+        this.contactAngle = 40 + Math.random() * 30;
 
         // Small droplets stick more easily
         this.isStuck = mass < 15 || Math.random() < this.stickForce * 0.5;
@@ -179,7 +311,6 @@ export class Droplet {
     }
 
     private calculateRadius(mass: number): number {
-        // Radius proportional to cube root of mass (volume)
         return Math.pow(mass, 0.4) * 2.5;
     }
 
@@ -192,13 +323,24 @@ export class Droplet {
         settings: RainSettings,
         windNoise: number,
         canvasHeight: number,
-        createTrailBead: (x: number, y: number, radius: number) => void
+        createTrailBead: (x: number, y: number, radius: number) => void,
+        rivuletMap?: RivuletMap,
+        enableRivuletAttraction?: boolean
     ): boolean {
-        const dt = deltaTime / 16.67; // Normalize to ~60fps
+        const dt = deltaTime / 16.67;
 
         // Fade in
         if (this.opacity < 1) {
             this.opacity = Math.min(1, this.opacity + 0.1 * dt);
+        }
+
+        // Update oscillation from merges
+        if (this.oscillationAmplitude > 0.001) {
+            this.oscillationPhase += dt * 0.5;
+            this.oscillationAmplitude *= Math.pow(0.92, dt);
+            const osc = Math.sin(this.oscillationPhase * 8) * this.oscillationAmplitude;
+            this.stretchX = 1 + osc;
+            this.stretchY = 1 - osc;
         }
 
         // Calculate forces
@@ -215,12 +357,16 @@ export class Droplet {
         const resistanceForce = this.stickForce * 0.1 / (this.mass * 0.1 + 1);
 
         if (this.isStuck) {
-            // Droplet is stuck - only moves if force exceeds threshold
-            const totalForce = gravity + Math.abs(windForceY);
-            const threshold = this.stickForce * (1 + 1 / (this.mass * 0.2 + 1));
+            // Energy-based surface tension: accumulate force energy
+            const appliedForce = gravity + Math.abs(windForceY) + Math.abs(windForceX);
+            this.stickEnergy += appliedForce * dt;
+            // Drain energy slowly (surface tension fighting back)
+            this.stickEnergy -= this.stickThreshold * 0.02 * dt;
+            this.stickEnergy = Math.max(0, this.stickEnergy);
 
-            if (totalForce > threshold) {
+            if (this.stickEnergy > this.stickThreshold) {
                 this.isStuck = false;
+                this.stickEnergy = 0;
             } else {
                 // Small jitter while stuck
                 this.x += (Math.random() - 0.5) * 0.1 * dt;
@@ -233,25 +379,49 @@ export class Droplet {
         this.vy += (gravity - resistanceForce * this.vy) * dt;
         this.vx += (windForceX - resistanceForce * this.vx) * dt;
 
+        // Rivulet channel attraction
+        if (enableRivuletAttraction && rivuletMap) {
+            const q = rivuletMap.query(this.x, this.y, this.baseRadius * 2);
+            if (q.strength > 0.1) {
+                this.vx += q.forceX * 0.001 * dt;
+                this.vy += q.forceY * 0.0005 * dt;
+            }
+        }
+
         // Random micro-movements for realism
         this.vx += (Math.random() - 0.5) * 0.02 * dt;
 
-        // Occasionally stick again if moving slowly
+        // Re-stick if moving slowly (energy-based: lower threshold on worn channels)
         if (totalVelocity < 0.3 && Math.random() < 0.01 * this.stickForce) {
             this.isStuck = true;
+            // Worn channel: easier to release next time
+            this.stickThreshold *= 0.7;
+            this.stickThreshold = Math.max(0.05, this.stickThreshold);
         }
 
         // Update position
         this.x += this.vx * dt;
         this.y += this.vy * dt;
 
-        // Calculate shape deformation based on velocity
-        const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
-        const targetStretchY = 1 + Math.min(speed * 0.3, 0.5);
-        const targetStretchX = 1 / Math.sqrt(targetStretchY); // Preserve volume
+        // Deposit onto rivulet map
+        if (rivuletMap && totalVelocity > 0.2) {
+            const norm = totalVelocity + 0.01;
+            rivuletMap.deposit(
+                this.x, this.y,
+                Math.min(0.15, totalVelocity * 0.03),
+                this.vx / norm,
+                this.vy / norm
+            );
+        }
 
-        this.stretchY += (targetStretchY - this.stretchY) * 0.1 * dt;
-        this.stretchX += (targetStretchX - this.stretchX) * 0.1 * dt;
+        // Calculate shape deformation based on velocity (only if not oscillating)
+        if (this.oscillationAmplitude <= 0.001) {
+            const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+            const targetStretchY = 1 + Math.min(speed * 0.3, 0.5);
+            const targetStretchX = 1 / Math.sqrt(targetStretchY);
+            this.stretchY += (targetStretchY - this.stretchY) * 0.1 * dt;
+            this.stretchX += (targetStretchX - this.stretchX) * 0.1 * dt;
+        }
 
         // Trail generation
         const distMoved = Math.sqrt(
@@ -262,7 +432,7 @@ export class Droplet {
         this.lastTrailX = this.x;
         this.lastTrailY = this.y;
 
-        // Create trail beads based on speed and mass
+        const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
         const trailInterval = Math.max(5, 20 - speed * 5);
         if (this.distanceSinceTrail > trailInterval && speed > 0.5 && this.mass > 8) {
             const trailRadius = this.baseRadius * (0.15 + Math.random() * 0.2);
@@ -270,7 +440,6 @@ export class Droplet {
             const trailY = this.y - this.baseRadius * this.stretchY * 0.5;
             createTrailBead(trailX, trailY, trailRadius);
 
-            // Lose a bit of mass when leaving trail
             this.mass = Math.max(5, this.mass - trailRadius * 0.5);
             this.baseRadius = this.calculateRadius(this.mass);
             this.distanceSinceTrail = 0;
@@ -279,7 +448,6 @@ export class Droplet {
         return this.y < canvasHeight + this.radius * 2;
     }
 
-    // Check collision with another droplet
     collidesWith(other: Droplet): boolean {
         const dx = this.x - other.x;
         const dy = this.y - other.y;
@@ -288,9 +456,16 @@ export class Droplet {
         return dist < minDist;
     }
 
-    // Merge with another droplet
     merge(other: Droplet): void {
         const totalMass = this.mass + other.mass;
+
+        // Calculate merge energy and angle for directional splash
+        const relVx = this.vx - other.vx;
+        const relVy = this.vy - other.vy;
+        const relSpeed = Math.sqrt(relVx * relVx + relVy * relVy);
+        const massRatio = Math.min(this.mass, other.mass) / Math.max(this.mass, other.mass);
+        this.lastMergeEnergy = relSpeed * massRatio + (totalMass / 50);
+        this.lastMergeAngle = Math.atan2(other.y - this.y, other.x - this.x);
 
         // Weighted average position
         this.x = (this.x * this.mass + other.x * other.mass) / totalMass;
@@ -309,12 +484,11 @@ export class Droplet {
             this.isStuck = false;
         }
 
-        // Brief stretch effect from merge
-        this.stretchY = 1.3;
-        this.stretchX = 0.85;
+        // Damped oscillation from merge impact
+        this.oscillationAmplitude = Math.min(0.3, this.lastMergeEnergy * 0.08);
+        this.oscillationPhase = 0;
     }
 
-    // Absorb a trail bead
     absorbBead(bead: TrailBead): void {
         const beadMass = bead.radius * 0.5;
         this.mass += beadMass;
@@ -327,19 +501,31 @@ export class RainSimulation {
     private droplets: Droplet[] = [];
     private trailBeads: TrailBead[] = [];
     private noise: SimplexNoise;
+    private gustNoise: SimplexNoise;
     private time: number = 0;
     private canvasWidth: number = 0;
     private canvasHeight: number = 0;
     maxDroplets: number = 500;
+    rivuletMap: RivuletMap;
+    enableRivuletAttraction: boolean;
+    rivuletCellSize: number;
 
-    constructor(maxDroplets: number = 500) {
+    // Gust intensity modulation
+    intensityMod: number = 1;
+
+    constructor(maxDroplets: number = 500, rivuletCellSize: number = 8, enableRivuletAttraction: boolean = true) {
         this.noise = new SimplexNoise();
+        this.gustNoise = new SimplexNoise(Math.random());
         this.maxDroplets = maxDroplets;
+        this.rivuletCellSize = rivuletCellSize;
+        this.enableRivuletAttraction = enableRivuletAttraction;
+        this.rivuletMap = new RivuletMap(1, 1, rivuletCellSize);
     }
 
     resize(width: number, height: number): void {
         this.canvasWidth = width;
         this.canvasHeight = height;
+        this.rivuletMap.resize(width, height);
     }
 
     getDroplets(): Droplet[] {
@@ -351,14 +537,12 @@ export class RainSimulation {
     }
 
     private spawnDroplet(settings: RainSettings): void {
-        // Spawn from top or slightly from sides based on wind
         const windRad = (settings.windAngle * Math.PI) / 180;
         const windOffset = Math.sin(windRad) * (settings.windSpeed / 100) * 100;
 
         const x = Math.random() * this.canvasWidth - windOffset;
         const y = -10 - Math.random() * 50;
 
-        // Mass distribution - mostly small drops, occasional large ones
         const massBase = 5 + settings.dropletSize * 2;
         const mass = massBase + Math.pow(Math.random(), 3) * massBase * 4;
 
@@ -366,15 +550,24 @@ export class RainSimulation {
     }
 
     private createTrailBead = (x: number, y: number, radius: number) => {
-        // Callback for droplets to create trail beads
         this.trailBeads.push(new TrailBead(x, y, radius, 50));
     };
 
     update(deltaTime: number, settings: RainSettings): void {
         this.time += deltaTime * 0.001;
 
-        // Spawn new droplets based on intensity
-        const spawnRate = (settings.intensity / 100) * 0.3;
+        // Rain intensity gusts — natural ebb-and-flow
+        const gustiness = (settings.gustiness ?? 50) / 100;
+        if (gustiness > 0) {
+            const n1 = this.gustNoise.noise2D(this.time * 0.03, 0);
+            const n2 = this.gustNoise.noise2D(this.time * 0.2, 5);
+            this.intensityMod = 0.3 + 0.7 * ((n1 * 0.7 + n2 * 0.3) * gustiness * 0.5 + 0.5);
+        } else {
+            this.intensityMod = 1;
+        }
+
+        // Spawn new droplets with gust modulation
+        const spawnRate = (settings.intensity / 100) * 0.3 * this.intensityMod;
         const spawnCount = Math.floor(spawnRate * (deltaTime / 16.67));
         for (let i = 0; i < spawnCount + (Math.random() < spawnRate ? 1 : 0); i++) {
             if (this.droplets.length < this.maxDroplets) {
@@ -385,10 +578,36 @@ export class RainSimulation {
         // Get wind noise for this frame
         const windNoise = this.noise.noise2D(this.time * 0.5, 0);
 
-        // Update trail beads
+        // Decay rivulet channels
+        this.rivuletMap.decay(deltaTime);
+
+        // Update trail beads with gravity and rivulet attraction
         for (let i = this.trailBeads.length - 1; i >= 0; i--) {
-            if (!this.trailBeads[i].update(deltaTime)) {
+            if (!this.trailBeads[i].update(deltaTime, this.rivuletMap, this.enableRivuletAttraction)) {
                 this.trailBeads.splice(i, 1);
+            }
+        }
+
+        // Merge nearby trail beads
+        for (let i = this.trailBeads.length - 1; i >= 0; i--) {
+            const a = this.trailBeads[i];
+            for (let j = i - 1; j >= 0; j--) {
+                const b = this.trailBeads[j];
+                const dx = a.x - b.x;
+                const dy = a.y - b.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < a.radius + b.radius) {
+                    // Merge into larger bead
+                    const totalArea = a.radius * a.radius + b.radius * b.radius;
+                    a.radius = Math.sqrt(totalArea);
+                    a.x = (a.x + b.x) / 2;
+                    a.y = (a.y + b.y) / 2;
+                    a.vx = (a.vx + b.vx) / 2;
+                    a.vy = (a.vy + b.vy) / 2;
+                    this.trailBeads.splice(j, 1);
+                    i--;
+                    break;
+                }
             }
         }
 
@@ -396,7 +615,7 @@ export class RainSimulation {
         for (let i = this.droplets.length - 1; i >= 0; i--) {
             const droplet = this.droplets[i];
 
-            if (!droplet.update(deltaTime, settings, windNoise, this.canvasHeight, this.createTrailBead)) {
+            if (!droplet.update(deltaTime, settings, windNoise, this.canvasHeight, this.createTrailBead, this.rivuletMap, this.enableRivuletAttraction)) {
                 this.droplets.splice(i, 1);
                 continue;
             }
@@ -418,11 +637,10 @@ export class RainSimulation {
             for (let j = i - 1; j >= 0; j--) {
                 const other = this.droplets[j];
                 if (droplet.collidesWith(other)) {
-                    // Merge into the larger droplet
                     if (droplet.mass > other.mass) {
                         droplet.merge(other);
                         this.droplets.splice(j, 1);
-                        i--; // Adjust index since we removed one
+                        i--;
                     } else {
                         other.merge(droplet);
                         this.droplets.splice(i, 1);
@@ -437,9 +655,9 @@ export class RainSimulation {
         this.droplets = [];
         this.trailBeads = [];
         this.time = 0;
+        this.rivuletMap.clear();
     }
 
-    // Pre-populate with some drops
     populate(settings: RainSettings): void {
         const count = Math.floor((settings.intensity / 100) * 50);
         for (let i = 0; i < count; i++) {
@@ -450,7 +668,7 @@ export class RainSimulation {
 
             const droplet = new Droplet(x, y, mass, settings);
             droplet.opacity = 1;
-            droplet.isStuck = Math.random() < 0.7; // Most are stuck initially
+            droplet.isStuck = Math.random() < 0.7;
             this.droplets.push(droplet);
         }
     }
