@@ -330,9 +330,11 @@ export class RainSimulation {
     private time: number = 0;
     private canvasWidth: number = 0;
     private canvasHeight: number = 0;
+    maxDroplets: number = 500;
 
-    constructor() {
+    constructor(maxDroplets: number = 500) {
         this.noise = new SimplexNoise();
+        this.maxDroplets = maxDroplets;
     }
 
     resize(width: number, height: number): void {
@@ -375,7 +377,7 @@ export class RainSimulation {
         const spawnRate = (settings.intensity / 100) * 0.3;
         const spawnCount = Math.floor(spawnRate * (deltaTime / 16.67));
         for (let i = 0; i < spawnCount + (Math.random() < spawnRate ? 1 : 0); i++) {
-            if (this.droplets.length < 500) {
+            if (this.droplets.length < this.maxDroplets) {
                 this.spawnDroplet(settings);
             }
         }
