@@ -45,11 +45,14 @@ export class SimplexNoise {
     private perm: number[] = [];
 
     constructor(seed = Math.random()) {
-        for (let i = 0; i < 256; i++) {
-            this.p[i] = Math.floor(seed * 256);
-            seed = (seed * 16807) % 2147483647;
-            seed = seed < 0 ? seed + 2147483647 : seed;
-            seed = (seed - 1) / 2147483646;
+        // Build a true permutation. The previous fractional-seed recurrence
+        // produced -1 values, which made grad3[undefined] crash the fog layer.
+        let state = Math.floor(seed * 0x100000000) >>> 0;
+        for (let i = 0; i < 256; i++) this.p[i] = i;
+        for (let i = 255; i > 0; i--) {
+            state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+            const j = state % (i + 1);
+            [this.p[i], this.p[j]] = [this.p[j], this.p[i]];
         }
         for (let i = 0; i < 512; i++) {
             this.perm[i] = this.p[i & 255];
