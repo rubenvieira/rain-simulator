@@ -3,7 +3,8 @@ import react from "@vitejs/plugin-react-swc";
 import path from "path";
 
 export default defineConfig(() => ({
-  base: "/tools/rain-simulator/",
+  // The Play release workflow supplies --base=/rain-simulator/ at build time.
+  base: "/",
   server: {
     host: "::",
     port: 8080,

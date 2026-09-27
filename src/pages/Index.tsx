@@ -355,7 +355,11 @@ const Index = () => {
   const noiseRef = useRef<SimplexNoise>(new SimplexNoise());
   const timeRef = useRef(0);
   const lastTimeRef = useRef(0);
-  const audioRef = useRef<any>(null);
+  const audioRef = useRef<{
+    rainNoise: Tone.Noise;
+    filter: Tone.Filter;
+    thunderSynth: Tone.NoiseSynth;
+  } | null>(null);
 
   // Cached layers (offscreen canvases)
   const bgLayerRef = useRef<HTMLCanvasElement | null>(null);
@@ -1214,6 +1218,7 @@ const Index = () => {
         let hlX = dx - rx * 0.3;
         let hlY = dy - ry * 0.33;
         if (PERF.enableDynamicSpecular && drop.baseRadius > 6) {
+          const orbs = bokehOrbsRef.current;
           // Find nearest bright bokeh orb and shift highlight accordingly
           let nearestDist = Infinity;
           let nearestOrb: BokehOrb | null = null;

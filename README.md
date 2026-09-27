@@ -52,7 +52,16 @@ Ensure you have Node.js and a package manager like `npm`, `yarn`, or `pnpm` inst
    pnpm dev
    ```
 
-4. Open your browser and navigate to the local URL (usually `http://localhost:5173/tools/rain-simulator`).
+4. Open your browser at the local URL printed by Vite (usually `http://localhost:8080/`).
+
+### Publishing on Play
+
+Pushing this repository does not publish the experience. Build it for its
+public path with `npm ci && npm run build -- --base=/rain-simulator/`, then
+release a reviewed commit from the Rain Simulator entry in
+`rubenv.net/admin/studio/experiments`. That release serves the experience at
+`https://play.rubenv.net/rain-simulator/`; the admin's release switch also
+controls when it is visible.
 
 ## 🎮 How to Use
 
