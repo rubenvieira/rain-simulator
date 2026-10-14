@@ -2,12 +2,40 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
-    <title>Rain Simulator</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Rain Simulator — rain on a window at night</title>
+    <meta name="description" content="Rain running down a window over a city street at night. Drag to wipe the fogged glass." />
+    <meta name="theme-color" content="#0b0d14" />
+    <meta property="og:title" content="Rain Simulator" />
+    <meta property="og:description" content="Rain running down a window over a city street at night. Drag to wipe the fogged glass." />
+    <meta property="og:image" content="https://play.rubenv.net/rain-simulator/og.jpg" />
+    <link rel="icon" href="/favicon.ico" />
   </head>
-
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <canvas id="glass" aria-label="Rain running down a window over a city street at night. Drag across the glass to wipe away the condensation."></canvas>
+    <p class="status" role="status"></p>
+    <div class="ui">
+      <header class="masthead">
+        <a class="brand" href="https://rubenv.net/interactive">rubenv.net</a>
+        <div class="title">
+          <h1>Rain Simulator</h1>
+          <p>Drag across the glass to wipe it.</p>
+        </div>
+      </header>
+      <section class="dock" aria-label="Weather controls">
+        <label class="control"><span>Rain</span><input id="rain" type="range" min="0" max="100" /></label>
+        <label class="control"><span>Wind</span><input id="wind" type="range" min="-100" max="100" /></label>
+        <label class="control"><span>Fog</span><input id="fog" type="range" min="0" max="100" /></label>
+        <div class="buttons">
+          <button id="lightning" type="button" aria-pressed="true"><span>Lightning</span></button>
+          <button id="sound" type="button" aria-pressed="false"><span>Sound</span></button>
+          <button id="pause" type="button" aria-pressed="false"><span>Pause</span></button>
+          <button id="reset" type="button"><span>Fog the glass</span></button>
+          <button id="hide" type="button" aria-label="Hide the interface (H)"><span>Hide</span></button>
+        </div>
+      </section>
+    </div>
+    <button id="show" type="button" hidden>Show controls</button>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
