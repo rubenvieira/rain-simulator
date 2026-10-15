@@ -1,9 +1,34 @@
+import { aboutHTML, barHTML, loadingHTML, mountChrome, savePicture } from "./play-chrome/play-chrome";
 import "./style.css";
 import { streetShader } from "./shaders/street";
 import { defocusShader, fullscreenVertex, glassShader } from "./shaders/glass";
 import { Water } from "./water";
 import { RainSound } from "./audio";
 
+document.body.insertAdjacentHTML("afterbegin", loadingHTML("Clouding over\u2026") + barHTML({ title: "Rain Simulator", tagline: "Rain on a window, a city street at night." }));
+document.body.insertAdjacentHTML("beforeend", aboutHTML({
+  "title": "Rain Simulator",
+  "intro": "Rain running down a window over a city street at night. Drops gather, merge and run in streaks, and the glass fogs up again behind them.",
+  "items": [
+    [
+      "Wipe",
+      "Drag across the glass to wipe away the condensation."
+    ],
+    [
+      "Weather",
+      "How hard it rains, which way the wind blows, and how quickly the glass fogs."
+    ],
+    [
+      "Lightning",
+      "Now and then the street lights up."
+    ],
+    [
+      "Keys",
+      "Space pauses · L lightning · R fogs the glass · S sound · H hides the interface · ? this page."
+    ]
+  ],
+  "close": "Back to the window"
+}));
 const canvas = document.querySelector<HTMLCanvasElement>("#glass")!;
 const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, preserveDrawingBuffer: false });
 const status = document.querySelector<HTMLElement>(".status")!;
@@ -179,12 +204,11 @@ function loop(now: number) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   frame(dt);
+  if (snapshot) { snapshot = false; savePicture(canvas, "rain-simulator.png"); }
   requestAnimationFrame(loop);
 }
 
 // ---------------------------------------------------------------- interface
-const ui = document.querySelector<HTMLElement>(".ui")!;
-const showUi = document.querySelector<HTMLButtonElement>("#show")!;
 const button = (id: string) => document.querySelector<HTMLButtonElement>(`#${id}`)!;
 const slider = (id: string) => document.querySelector<HTMLInputElement>(`#${id}`)!;
 
@@ -207,25 +231,20 @@ const toggleSound = async () => setPressed(soundButton, await sound.toggle());
 soundButton.addEventListener("click", toggleSound);
 
 const pauseButton = button("pause");
-const togglePause = () => { paused = !paused; setPressed(pauseButton, paused); pauseButton.querySelector("span")!.textContent = paused ? "Play" : "Pause"; };
+const togglePause = () => { paused = !paused; setPressed(pauseButton, paused); pauseButton.textContent = paused ? "Play" : "Pause"; };
 pauseButton.addEventListener("click", togglePause);
 
 const resetGlass = () => water.reset();
 button("reset").addEventListener("click", resetGlass);
 
-const setHidden = (hidden: boolean) => {
-  ui.hidden = hidden;
-  showUi.hidden = !hidden;
-  (hidden ? showUi : button("hide")).focus({ preventScroll: true });
-};
-button("hide").addEventListener("click", () => setHidden(true));
-showUi.addEventListener("click", () => setHidden(false));
+mountChrome({ accent: "#f0b46a", night: "#0b0d14" });
+let snapshot = false;
+document.querySelector("#keep")!.addEventListener("click", () => { snapshot = true; });
 
 addEventListener("keydown", (e) => {
   if (e.target instanceof HTMLInputElement || e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key.toLowerCase();
   if (k === " ") { e.preventDefault(); togglePause(); }
-  else if (k === "h") setHidden(!ui.hidden);
   else if (k === "s") void toggleSound();
   else if (k === "l") lightningButton.click();
   else if (k === "r") resetGlass();
