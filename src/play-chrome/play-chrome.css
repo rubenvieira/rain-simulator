@@ -58,7 +58,7 @@
 .pc-dock::-webkit-scrollbar{display:none}
 .pc-dock button{display:flex;align-items:center;gap:7px;padding:9px 13px 9px 10px;flex:none}
 .pc-dock button svg{width:19px;height:19px}
-.pc-dock button[aria-pressed=true],.pc-menu button[aria-pressed=true]{background:var(--pc-accent);color:var(--pc-on-accent);font-weight:600}
+.pc-dock button[aria-pressed=true],.pc-menu button[aria-pressed=true],.pc-dock button[aria-checked=true],.pc-menu button[aria-checked=true]{background:var(--pc-accent);color:var(--pc-on-accent);font-weight:600}
 .pc-dock button.pc-text{padding:9px 13px}
 .pc-dock button.pc-only{padding:9px}
 .pc-dock button[aria-expanded=true]{background:var(--pc-hover)}

@@ -136,7 +136,7 @@ export function mountChrome(o: MountOptions = {}) {
   show.className = 'pc-show';
   show.hidden = true;
   show.innerHTML = `${icons.show}<span>Show controls</span>`;
-  document.body.append(show);
+  document.body.appendChild(show);
   const setHidden = (hidden: boolean) => {
     document.body.classList.toggle('pc-hidden', hidden);
     show.hidden = !hidden;
